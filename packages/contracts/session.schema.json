@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigorsync.local/schemas/session.schema.json",
+  "title": "VigorSync session record",
+  "description": "Public session representation returned by the Core API.",
+  "type": "object",
+  "required": [
+    "session_id",
+    "status",
+    "exercise",
+    "view",
+    "created_at",
+    "started_at",
+    "ended_at",
+    "target_reps",
+    "notes",
+    "job_id",
+    "report_url",
+    "live_summary",
+    "error"
+  ],
+  "properties": {
+    "session_id": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionId"
+    },
+    "status": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionStatus"
+    },
+    "exercise": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/Exercise"
+    },
+    "view": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/View"
+    },
+    "target_reps": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Target repetition count; null means no target.",
+      "minimum": 1,
+      "maximum": 999,
+      "default": null
+    },
+    "notes": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 1000,
+      "default": null
+    },
+    "created_at": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/IsoTimestamp"
+    },
+    "started_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "default": null
+    },
+    "ended_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "default": null
+    },
+    "job_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^job_[A-Za-z0-9_-]{6,64}$",
+      "default": null
+    },
+    "report_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uri-reference",
+      "default": null
+    },
+    "live_summary": {
+      "oneOf": [
+        {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/LiveSummary"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "error": {
+      "oneOf": [
+        {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionError"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "additionalProperties": false
+}

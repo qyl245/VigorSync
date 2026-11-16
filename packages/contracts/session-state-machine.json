@@ -1,0 +1,30 @@
+{
+  "schema_version": "vigorsync-session-state-machine-v1",
+  "initial": "created",
+  "terminal": [
+    "completed",
+    "failed",
+    "cancelled"
+  ],
+  "transitions": [
+    {"from": "created", "to": "preparing", "trigger": "command.start"},
+    {"from": "preparing", "to": "preparing", "trigger": "command.start"},
+    {"from": "created", "to": "cancelled", "trigger": "command.cancel"},
+    {"from": "preparing", "to": "cancelled", "trigger": "command.cancel"},
+    {"from": "preparing", "to": "active", "trigger": "internal.live_ready"},
+    {"from": "active", "to": "paused", "trigger": "command.pause"},
+    {"from": "paused", "to": "active", "trigger": "command.resume"},
+    {"from": "active", "to": "stopping", "trigger": "command.stop"},
+    {"from": "paused", "to": "stopping", "trigger": "command.stop"},
+    {"from": "active", "to": "cancelled", "trigger": "command.cancel"},
+    {"from": "paused", "to": "cancelled", "trigger": "command.cancel"},
+    {"from": "stopping", "to": "analyzing", "trigger": "internal.finalize_accepted"},
+    {"from": "analyzing", "to": "completed", "trigger": "internal.report_ready"},
+    {"from": "created", "to": "failed", "trigger": "internal.start_failed"},
+    {"from": "preparing", "to": "failed", "trigger": "internal.start_failed"},
+    {"from": "active", "to": "failed", "trigger": "internal.runtime_failed"},
+    {"from": "paused", "to": "failed", "trigger": "internal.runtime_failed"},
+    {"from": "stopping", "to": "failed", "trigger": "internal.finalize_failed"},
+    {"from": "analyzing", "to": "failed", "trigger": "internal.analysis_failed"}
+  ]
+}

@@ -1,0 +1,1074 @@
+openapi: 3.1.0
+info:
+  title: VigorSync Contract API
+  version: 0.1.0
+  description: |
+    Frozen M0 contract for the VigorSync core API and local Live Engine.
+    High-rate video and landmarks stay on the mirror device. The mobile client
+    receives low-frequency summaries only.
+  contact:
+    name: VigorSync
+servers:
+  - url: http://{host}:8011
+    description: Core API; loopback in development and LAN in production.
+    variables:
+      host:
+        default: 127.0.0.1
+        description: Core host reachable by the paired mobile device.
+tags:
+  - name: health
+  - name: pairing
+  - name: sessions
+  - name: events
+  - name: reports
+  - name: internal
+  - name: live-engine
+  - name: websocket
+x-contract-version: v1
+x-session-state-machine: ./session-state-machine.json
+x-trust-boundaries:
+  core-api: LAN with bearer token
+  live-engine: loopback 127.0.0.1 only with X-Internal-Token
+  mirror-preview: loopback MJPEG and WebSocket
+  mobile-live-data: 2-5 Hz summaries only, never raw frames or landmarks
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: pairing-token
+    internalToken:
+      type: apiKey
+      in: header
+      name: X-Internal-Token
+
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        $ref: ./common.schema.json#/$defs/SessionId
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Same key and operation must return the original result.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    AfterSeq:
+      name: after_seq
+      in: query
+      required: false
+      description: Return events whose seq is greater than this value.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    EventLimit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 200
+    SessionListLimit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    SessionStatusFilter:
+      name: status
+      in: query
+      required: false
+      schema:
+        $ref: ./common.schema.json#/$defs/SessionStatus
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 256
+        default: ""
+    IncludeReport:
+      name: include_report
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+    ClientToken:
+      name: token
+      in: query
+      required: true
+      schema:
+        type: string
+        minLength: 8
+
+  responses:
+    BadRequest:
+      description: Invalid request body, path, query or state for this operation.
+      content:
+        application/json:
+          schema:
+            $ref: ./common.schema.json#/$defs/ErrorEnvelope
+    Unauthorized:
+      description: Missing or invalid bearer, mirror or internal token.
+      content:
+        application/json:
+          schema:
+            $ref: ./common.schema.json#/$defs/ErrorEnvelope
+    NotFound:
+      description: Session, job or report was not found.
+      content:
+        application/json:
+          schema:
+            $ref: ./common.schema.json#/$defs/ErrorEnvelope
+    Conflict:
+      description: Command conflicts with the current session state.
+      content:
+        application/json:
+          schema:
+            $ref: ./common.schema.json#/$defs/ErrorEnvelope
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: ./common.schema.json#/$defs/ErrorEnvelope
+
+  schemas:
+    Session:
+      $ref: ./session.schema.json
+    LiveEvent:
+      $ref: ./live-event.schema.json
+    SessionSummary:
+      $ref: ./session-summary.schema.json
+    LandmarkFrame:
+      $ref: ./landmark-frame.schema.json
+    LiveMetrics:
+      $ref: ./common.schema.json#/$defs/LiveMetrics
+    LiveSummary:
+      $ref: ./common.schema.json#/$defs/LiveSummary
+    SessionArtifacts:
+      $ref: ./common.schema.json#/$defs/SessionArtifacts
+    ErrorEnvelope:
+      $ref: ./common.schema.json#/$defs/ErrorEnvelope
+
+    HealthResponse:
+      type: object
+      required: [status, version, live_engine, offline_worker]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        version:
+          type: string
+          pattern: '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$'
+        live_engine:
+          type: string
+          enum: [ok, unavailable, unknown]
+        offline_worker:
+          type: string
+          enum: [ok, unavailable, unknown]
+      additionalProperties: false
+
+    PairingClaimRequest:
+      type: object
+      required: [pairing_code, device_name, platform]
+      properties:
+        pairing_code:
+          type: string
+          pattern: '^[0-9]{6}$'
+        device_name:
+          type: string
+          minLength: 1
+          maxLength: 96
+        platform:
+          type: string
+          enum: [android, ios]
+      additionalProperties: false
+
+    PairingClaimResponse:
+      type: object
+      required: [token, core_url, expires_at]
+      properties:
+        token:
+          type: string
+          minLength: 8
+          maxLength: 512
+        core_url:
+          type: string
+          format: uri
+        expires_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    CreateSessionRequest:
+      type: object
+      required: [exercise, view]
+      properties:
+        exercise:
+          $ref: ./common.schema.json#/$defs/Exercise
+        view:
+          $ref: ./common.schema.json#/$defs/View
+        target_reps:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 999
+          default: null
+        notes:
+          type: [string, 'null']
+          maxLength: 1000
+          default: null
+      additionalProperties: false
+
+    SessionPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: ./session.schema.json
+        next_cursor:
+          type: [string, 'null']
+      additionalProperties: false
+
+    EventsPage:
+      type: object
+      required: [items, next_seq]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: ./live-event.schema.json
+        next_seq:
+          type: integer
+          minimum: 0
+          description: Highest returned seq; pass it as after_seq on the next poll.
+      additionalProperties: false
+
+    ReportSummary:
+      type: object
+      required: [rep_count, rejected_rep_count, quality_status, active_issue_count]
+      properties:
+        rep_count:
+          type: integer
+          minimum: 0
+        rejected_rep_count:
+          type: integer
+          minimum: 0
+        quality_status:
+          type: string
+          enum: [good, limited, poor, unknown]
+        active_issue_count:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+
+    SessionReport:
+      type: object
+      required: [session_id, job_id, status, report_url, summary]
+      properties:
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        job_id:
+          type: [string, 'null']
+          pattern: '^job_[A-Za-z0-9_-]{6,64}$'
+        status:
+          type: string
+          enum: [pending, ready, failed]
+        report_url:
+          type: [string, 'null']
+          format: uri-reference
+        summary:
+          oneOf:
+            - $ref: '#/components/schemas/ReportSummary'
+            - type: 'null'
+      additionalProperties: false
+
+    MediaDeleteResponse:
+      type: object
+      required: [session_id, video_deleted, landmarks_deleted, report_deleted]
+      properties:
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        video_deleted:
+          type: boolean
+        landmarks_deleted:
+          type: boolean
+        report_deleted:
+          type: boolean
+          description: False when include_report was false or no report existed.
+      additionalProperties: false
+
+    InternalStateUpdate:
+      type: object
+      required: [status, t_ms, payload]
+      properties:
+        status:
+          $ref: ./common.schema.json#/$defs/SessionStatus
+        t_ms:
+          $ref: ./common.schema.json#/$defs/NonNegativeInteger
+        payload:
+          $ref: ./common.schema.json#/$defs/LiveMetrics
+      additionalProperties: false
+
+    InternalStateResponse:
+      type: object
+      required: [accepted, session_id, status]
+      properties:
+        accepted:
+          const: true
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        status:
+          $ref: ./common.schema.json#/$defs/SessionStatus
+      additionalProperties: false
+
+    FinalizeRequest:
+      type: object
+      required: [artifacts, summary]
+      properties:
+        artifacts:
+          $ref: ./common.schema.json#/$defs/SessionArtifacts
+        summary:
+          $ref: ./common.schema.json#/$defs/LiveSummary
+      additionalProperties: false
+
+    FinalizeResponse:
+      type: object
+      required: [session_id, status, job_id]
+      properties:
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        status:
+          $ref: ./common.schema.json#/$defs/SessionStatus
+        job_id:
+          $ref: ./common.schema.json#/$defs/JobId
+      additionalProperties: false
+
+    LiveStartRequest:
+      type: object
+      required: [exercise, view, session_dir]
+      properties:
+        exercise:
+          $ref: ./common.schema.json#/$defs/Exercise
+        view:
+          $ref: ./common.schema.json#/$defs/View
+        target_reps:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 999
+          default: null
+        session_dir:
+          type: string
+          minLength: 1
+          maxLength: 4096
+      additionalProperties: false
+
+    LiveStartResponse:
+      type: object
+      required: [session_id, status, stream_url, ws_url]
+      properties:
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        status:
+          const: preparing
+        stream_url:
+          type: string
+          format: uri
+        ws_url:
+          type: string
+          format: uri
+      additionalProperties: false
+
+    LiveControlResponse:
+      type: object
+      required: [session_id, status]
+      properties:
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        status:
+          $ref: ./common.schema.json#/$defs/LiveSessionStatus
+      additionalProperties: false
+
+    LiveStopResponse:
+      type: object
+      required: [session_id, status, artifacts, summary]
+      properties:
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        status:
+          const: finalized
+        artifacts:
+          $ref: ./common.schema.json#/$defs/SessionArtifacts
+        summary:
+          $ref: ./common.schema.json#/$defs/LiveSummary
+      additionalProperties: false
+
+    SessionSnapshotMessage:
+      type: object
+      required: [type, version, session_id, server_time, payload]
+      properties:
+        type:
+          const: session.snapshot
+        version:
+          const: v1
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        server_time:
+          $ref: ./common.schema.json#/$defs/IsoTimestamp
+        payload:
+          $ref: ./session.schema.json
+      additionalProperties: false
+
+    ReportReadyMessage:
+      type: object
+      required: [type, version, session_id, job_id, report_url]
+      properties:
+        type:
+          const: report.ready
+        version:
+          const: v1
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        job_id:
+          $ref: ./common.schema.json#/$defs/JobId
+        report_url:
+          type: string
+          format: uri-reference
+      additionalProperties: false
+
+    ErrorMessage:
+      type: object
+      required: [type, version, error]
+      properties:
+        type:
+          const: error
+        version:
+          const: v1
+        error:
+          $ref: ./common.schema.json#/$defs/ApiError
+      additionalProperties: false
+
+    MirrorSessionStartMessage:
+      type: object
+      required: [type, version, session_id, payload]
+      properties:
+        type:
+          const: session.start
+        version:
+          const: v1
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        payload:
+          type: object
+          required: [exercise, view, stream_url, ws_url]
+          properties:
+            exercise:
+              $ref: ./common.schema.json#/$defs/Exercise
+            view:
+              $ref: ./common.schema.json#/$defs/View
+            target_reps:
+              type: [integer, 'null']
+              minimum: 1
+              maximum: 999
+              default: null
+            stream_url:
+              type: string
+              format: uri
+            ws_url:
+              type: string
+              format: uri
+          additionalProperties: false
+      additionalProperties: false
+
+    MirrorStateMessage:
+      type: object
+      required: [type, version, payload]
+      properties:
+        type:
+          const: mirror.state
+        version:
+          const: v1
+        payload:
+          type: object
+          required: [state, session_id]
+          properties:
+            state:
+              type: string
+              enum: [idle, preparing, training, paused, error]
+            session_id:
+              oneOf:
+                - $ref: ./common.schema.json#/$defs/SessionId
+                - type: 'null'
+          additionalProperties: false
+      additionalProperties: false
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Read service health
+      security: []
+      responses:
+        '200':
+          description: Core service health.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/pairing/claim:
+    post:
+      tags: [pairing]
+      operationId: claimPairingCode
+      summary: Exchange a short-lived pairing code for a device token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PairingClaimRequest'
+      responses:
+        '200':
+          description: Device token issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PairingClaimResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/sessions:
+    post:
+      tags: [sessions]
+      operationId: createSession
+      summary: Create a training session
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '201':
+          description: Session created; status is created.
+          content:
+            application/json:
+              schema:
+                $ref: ./session.schema.json
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [sessions]
+      operationId: listSessions
+      summary: List sessions for the paired device
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionStatusFilter'
+        - $ref: '#/components/parameters/SessionListLimit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Cursor page ordered by created_at descending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/sessions/{session_id}:
+    get:
+      tags: [sessions]
+      operationId: getSession
+      summary: Read a session snapshot
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Current session record.
+          content:
+            application/json:
+              schema:
+                $ref: ./session.schema.json
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/sessions/{session_id}/start:
+    post:
+      tags: [sessions]
+      operationId: startSession
+      summary: Start a created session and prepare the Live Engine
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Session moved to preparing.
+          content:
+            application/json:
+              schema:
+                $ref: ./session.schema.json
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/sessions/{session_id}/pause:
+    post:
+      tags: [sessions]
+      operationId: pauseSession
+      summary: Pause an active session
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Session paused.
+          content:
+            application/json:
+              schema:
+                $ref: ./session.schema.json
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/sessions/{session_id}/resume:
+    post:
+      tags: [sessions]
+      operationId: resumeSession
+      summary: Resume a paused session
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Session active.
+          content:
+            application/json:
+              schema:
+                $ref: ./session.schema.json
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/sessions/{session_id}/stop:
+    post:
+      tags: [sessions]
+      operationId: stopSession
+      summary: Stop training and finalize local artifacts
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Session moved to stopping.
+          content:
+            application/json:
+              schema:
+                $ref: ./session.schema.json
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/sessions/{session_id}/cancel:
+    post:
+      tags: [sessions]
+      operationId: cancelSession
+      summary: Cancel a non-terminal session
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Session cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: ./session.schema.json
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/sessions/{session_id}/events:
+    get:
+      tags: [events]
+      operationId: listSessionEvents
+      summary: Poll persisted session events
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/AfterSeq'
+        - $ref: '#/components/parameters/EventLimit'
+      responses:
+        '200':
+          description: Events ordered by seq ascending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventsPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/sessions/{session_id}/report:
+    get:
+      tags: [reports]
+      operationId: getSessionReport
+      summary: Read the offline report state for a session
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Report metadata; pending reports have a null URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionReport'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Report is not ready yet (error code report_not_ready).
+          content:
+            application/json:
+              schema:
+                $ref: ./common.schema.json#/$defs/ErrorEnvelope
+
+  /api/v1/sessions/{session_id}/media:
+    delete:
+      tags: [sessions]
+      operationId: deleteSessionMedia
+      summary: Delete original video and landmarks
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IncludeReport'
+      responses:
+        '200':
+          description: Deletion result. Repeated calls are idempotent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaDeleteResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/internal/sessions/{session_id}/state:
+    post:
+      tags: [internal]
+      operationId: reportLiveState
+      summary: Report a low-frequency Live Engine state to Core
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalStateUpdate'
+      responses:
+        '200':
+          description: State accepted; Core may coalesce updates to 2-5 Hz for mobile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalStateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/internal/sessions/{session_id}/finalize:
+    post:
+      tags: [internal]
+      operationId: finalizeSessionArtifacts
+      summary: Submit validated local artifacts and enqueue offline analysis
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeRequest'
+      responses:
+        '202':
+          description: Artifacts accepted and job created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinalizeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /internal/v1/sessions/{session_id}/start:
+    post:
+      tags: [live-engine]
+      operationId: startLiveSession
+      summary: Start camera, pose model and recording on the local Live Engine
+      servers:
+        - url: http://127.0.0.1:8020
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LiveStartRequest'
+      responses:
+        '202':
+          description: Live Engine is loading the model and opening the camera.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveStartResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: camera_busy or session already prepared.
+          content:
+            application/json:
+              schema:
+                $ref: ./common.schema.json#/$defs/ErrorEnvelope
+
+  /internal/v1/sessions/{session_id}/pause:
+    post:
+      tags: [live-engine]
+      operationId: pauseLiveSession
+      summary: Pause rep and alert accumulation while keeping preview available
+      servers:
+        - url: http://127.0.0.1:8020
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Live Engine paused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveControlResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /internal/v1/sessions/{session_id}/resume:
+    post:
+      tags: [live-engine]
+      operationId: resumeLiveSession
+      summary: Resume counting after a pause
+      servers:
+        - url: http://127.0.0.1:8020
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Live Engine active.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveControlResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /internal/v1/sessions/{session_id}/stop:
+    post:
+      tags: [live-engine]
+      operationId: stopLiveSession
+      summary: Close local artifacts and return their paths
+      servers:
+        - url: http://127.0.0.1:8020
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Live Engine finalized all local files.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveStopResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /live/{session_id}/stream.mjpg:
+    get:
+      tags: [live-engine]
+      operationId: getLiveMjpegStream
+      summary: Read the loopback-only annotated MJPEG preview
+      description: |
+        Available only from 127.0.0.1. The Live Engine draws the skeleton and
+        phase overlay into each 640x480 frame; clients never receive raw points.
+      servers:
+        - url: http://127.0.0.1:8020
+      security: []
+      x-loopback-only: true
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: MJPEG stream at a default 15 FPS.
+          headers:
+            Cache-Control:
+              schema:
+                const: no-store
+          content:
+            multipart/x-mixed-replace:
+              schema:
+                type: string
+                format: binary
+        '403':
+          description: Request did not originate from loopback.
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/ws/client:
+    get:
+      tags: [websocket]
+      operationId: connectMobileWebSocket
+      summary: Mobile WebSocket carrying low-frequency session updates
+      description: |
+        Message types are session.snapshot, session.state, live.metrics,
+        rep.completed, form.alert, report.ready and error. live.metrics is
+        rate-limited to 2-5 Hz. Raw frames and landmarks are forbidden.
+      security: []
+      x-websocket: true
+      x-message-types: [session.snapshot, session.state, live.metrics, rep.completed, form.alert, report.ready, error]
+      parameters:
+        - $ref: '#/components/parameters/ClientToken'
+      responses:
+        '101':
+          description: WebSocket upgrade accepted.
+
+  /api/v1/ws/mirror:
+    get:
+      tags: [websocket]
+      operationId: connectMirrorWebSocket
+      summary: Mirror control WebSocket
+      security: []
+      x-websocket: true
+      x-message-types: [session.start, session.state, mirror.state, error]
+      parameters:
+        - $ref: '#/components/parameters/ClientToken'
+      responses:
+        '101':
+          description: WebSocket upgrade accepted.
+
+  /ws/live/{session_id}:
+    get:
+      tags: [websocket, live-engine]
+      operationId: connectLiveEngineWebSocket
+      summary: Loopback Live Engine WebSocket carrying high-rate events
+      description: |
+        Emits live.metrics at 5-10 Hz plus rep.completed, form.alert and
+        session.state. Payloads are defined by live-event.schema.json.
+      servers:
+        - url: ws://127.0.0.1:8020
+      security: []
+      x-websocket: true
+      x-loopback-only: true
+      x-message-types: [live.metrics, rep.completed, form.alert, session.state]
+      x-event-schema: ./live-event.schema.json
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '101':
+          description: WebSocket upgrade accepted.

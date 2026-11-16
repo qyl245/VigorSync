@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigorsync.local/schemas/live-event.schema.json",
+  "title": "VigorSync live session event",
+  "description": "Event written to events.jsonl and published over the Live Engine WebSocket.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/LiveMetricsEvent"
+    },
+    {
+      "$ref": "#/$defs/RepCompletedEvent"
+    },
+    {
+      "$ref": "#/$defs/FormAlertEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionStateEvent"
+    }
+  ],
+  "$defs": {
+    "LiveMetricsEvent": {
+      "type": "object",
+      "required": [
+        "type",
+        "session_id",
+        "t_ms",
+        "seq",
+        "payload"
+      ],
+      "properties": {
+        "type": {
+          "const": "live.metrics"
+        },
+        "session_id": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionId"
+        },
+        "t_ms": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "seq": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "version": {
+          "const": "v1"
+        },
+        "created_at": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/IsoTimestamp"
+        },
+        "payload": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/LiveMetrics"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RepCompletedEvent": {
+      "type": "object",
+      "required": [
+        "type",
+        "session_id",
+        "t_ms",
+        "seq",
+        "payload"
+      ],
+      "properties": {
+        "type": {
+          "const": "rep.completed"
+        },
+        "session_id": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionId"
+        },
+        "t_ms": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "seq": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "version": {
+          "const": "v1"
+        },
+        "created_at": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/IsoTimestamp"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "rep_id",
+            "start_ms",
+            "end_ms",
+            "duration_ms",
+            "confidence"
+          ],
+          "properties": {
+            "rep_id": {
+              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/RepId"
+            },
+            "start_ms": {
+              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+            },
+            "end_ms": {
+              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+            },
+            "duration_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "confidence": {
+              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/Confidence"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "FormAlertEvent": {
+      "type": "object",
+      "required": [
+        "type",
+        "session_id",
+        "t_ms",
+        "seq",
+        "payload"
+      ],
+      "properties": {
+        "type": {
+          "const": "form.alert"
+        },
+        "session_id": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionId"
+        },
+        "t_ms": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "seq": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "version": {
+          "const": "v1"
+        },
+        "created_at": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/IsoTimestamp"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "code",
+            "severity",
+            "message",
+            "confidence"
+          ],
+          "properties": {
+            "code": {
+              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/IssueCode"
+            },
+            "severity": {
+              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/AlertSeverity"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "confidence": {
+              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/Confidence"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "SessionStateEvent": {
+      "type": "object",
+      "required": [
+        "type",
+        "session_id",
+        "t_ms",
+        "seq",
+        "payload"
+      ],
+      "properties": {
+        "type": {
+          "const": "session.state"
+        },
+        "session_id": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionId"
+        },
+        "t_ms": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "seq": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+        },
+        "version": {
+          "const": "v1"
+        },
+        "created_at": {
+          "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/IsoTimestamp"
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "status",
+            "previous_status"
+          ],
+          "properties": {
+            "status": {
+              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionStatus"
+            },
+            "previous_status": {
+              "oneOf": [
+                {
+                  "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

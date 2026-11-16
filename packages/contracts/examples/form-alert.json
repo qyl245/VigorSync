@@ -1,0 +1,13 @@
+{
+  "type": "form.alert",
+  "version": "v1",
+  "session_id": "s_01JABC123",
+  "t_ms": 18410,
+  "seq": 173,
+  "payload": {
+    "code": "squat_depth_insufficient",
+    "severity": "medium",
+    "message": "下蹲深度不够",
+    "confidence": 0.88
+  }
+}

@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigorsync.local/schemas/common.schema.json",
+  "title": "VigorSync common contract definitions",
+  "description": "Shared identifiers, enums and value objects for VigorSync contracts.",
+  "$defs": {
+    "SessionId": {
+      "type": "string",
+      "pattern": "^s_[A-Za-z0-9_-]{6,64}$"
+    },
+    "JobId": {
+      "type": "string",
+      "pattern": "^job_[A-Za-z0-9_-]{6,64}$"
+    },
+    "RepId": {
+      "type": "string",
+      "pattern": "^r_[A-Za-z0-9_-]{4,64}$"
+    },
+    "IsoTimestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "Exercise": {
+      "type": "string",
+      "enum": [
+        "squat",
+        "pushup"
+      ]
+    },
+    "View": {
+      "type": "string",
+      "enum": [
+        "front",
+        "rear",
+        "oblique_left",
+        "oblique_right",
+        "side_left",
+        "side_right",
+        "unknown"
+      ]
+    },
+    "SessionStatus": {
+      "type": "string",
+      "enum": [
+        "created",
+        "preparing",
+        "active",
+        "paused",
+        "stopping",
+        "analyzing",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "LiveSessionStatus": {
+      "type": "string",
+      "description": "Lifecycle state owned by the local Live Engine. finalized means all local artifacts are closed and reported to Core.",
+      "enum": [
+        "preparing",
+        "active",
+        "paused",
+        "stopping",
+        "finalized",
+        "failed"
+      ]
+    },
+    "SessionCommand": {
+      "type": "string",
+      "enum": [
+        "start",
+        "pause",
+        "resume",
+        "stop",
+        "cancel"
+      ]
+    },
+    "LivePhase": {
+      "type": "string",
+      "enum": [
+        "up",
+        "down",
+        "transition",
+        "unknown"
+      ]
+    },
+    "AlertSeverity": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "IssueCode": {
+      "type": "string",
+      "enum": [
+        "squat_depth_insufficient",
+        "squat_torso_lean_excess",
+        "squat_knee_valgus",
+        "squat_asymmetry",
+        "squat_tempo_inconsistent",
+        "squat_stability_low",
+        "pushup_depth_insufficient",
+        "pushup_body_line_break",
+        "pushup_hip_sag",
+        "pushup_asymmetry",
+        "pushup_tempo_inconsistent",
+        "pushup_stability_low"
+      ]
+    },
+    "Confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "NonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "NonNegativeNumber": {
+      "type": "number",
+      "minimum": 0
+    },
+    "AlertCounts": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/IssueCode"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/NonNegativeInteger"
+      }
+    },
+    "SessionError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "LiveSummary": {
+      "type": "object",
+      "required": [
+        "reps",
+        "duration_s",
+        "mean_confidence",
+        "alert_counts"
+      ],
+      "properties": {
+        "reps": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/NonNegativeNumber"
+        },
+        "mean_confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "alert_counts": {
+          "$ref": "#/$defs/AlertCounts"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LiveMetrics": {
+      "type": "object",
+      "required": [
+        "exercise",
+        "phase",
+        "reps",
+        "confidence",
+        "fps",
+        "paused"
+      ],
+      "properties": {
+        "exercise": {
+          "$ref": "#/$defs/Exercise"
+        },
+        "phase": {
+          "$ref": "#/$defs/LivePhase"
+        },
+        "reps": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "fps": {
+          "type": "number",
+          "description": "Measured end-to-end inference rate in frames per second.",
+          "minimum": 0,
+          "maximum": 120
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "joint_angle": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 180
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "elapsed_s": {
+          "$ref": "#/$defs/NonNegativeNumber"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SessionArtifacts": {
+      "type": "object",
+      "description": "Absolute local paths produced by the Live Engine and validated by Core before offline analysis.",
+      "required": [
+        "video_path",
+        "landmarks_path",
+        "events_path",
+        "summary_path"
+      ],
+      "properties": {
+        "video_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "landmarks_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "events_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "summary_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "additionalProperties": false
+    },
+    "ApiError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "request_id"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "ErrorEnvelope": {
+      "type": "object",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ApiError"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

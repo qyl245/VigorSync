@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigorsync.local/schemas/session-summary.schema.json",
+  "title": "VigorSync live session summary",
+  "description": "Summary written by the Live Engine after a session is finalized.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "session_id",
+    "exercise",
+    "view",
+    "started_at",
+    "ended_at",
+    "reps",
+    "duration_s",
+    "mean_confidence",
+    "alert_counts",
+    "algorithm"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "vigorsync-live-session-v1"
+    },
+    "session_id": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionId"
+    },
+    "exercise": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/Exercise"
+    },
+    "view": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/View"
+    },
+    "started_at": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/IsoTimestamp"
+    },
+    "ended_at": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/IsoTimestamp"
+    },
+    "reps": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+    },
+    "duration_s": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeNumber"
+    },
+    "mean_confidence": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/Confidence"
+    },
+    "alert_counts": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/AlertCounts"
+    },
+    "algorithm": {
+      "type": "object",
+      "required": [
+        "pose_model",
+        "inference_fps",
+        "version"
+      ],
+      "properties": {
+        "pose_model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+    "inference_fps": {
+      "type": "number",
+      "description": "Mean inference rate in frames per second.",
+      "minimum": 0,
+          "maximum": 120
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

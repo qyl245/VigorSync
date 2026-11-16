@@ -1,0 +1,14 @@
+{
+  "schema_version": "vigorsync-contract-examples-v1",
+  "examples": [
+    {"file": "session-created.json", "schema": "session.schema.json"},
+    {"file": "session-active.json", "schema": "session.schema.json"},
+    {"file": "session-completed.json", "schema": "session.schema.json"},
+    {"file": "live-metrics.json", "schema": "live-event.schema.json"},
+    {"file": "rep-completed.json", "schema": "live-event.schema.json"},
+    {"file": "form-alert.json", "schema": "live-event.schema.json"},
+    {"file": "session-state.json", "schema": "live-event.schema.json"},
+    {"file": "session-summary.json", "schema": "session-summary.schema.json"},
+    {"file": "landmark-frame.json", "schema": "landmark-frame.schema.json"}
+  ]
+}

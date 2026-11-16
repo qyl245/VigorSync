@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vigorsync-live"
+version = "0.1.0"
+description = "VigorSync local real-time camera and pose engine"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.162.0",
+  "jax==0.4.38",
+  "jaxlib==0.4.38",
+  "jsonschema==4.26.0",
+  "matplotlib==3.10.9",
+  "mediapipe==0.10.21",
+  "numpy==1.26.4",
+  "opencv-contrib-python==4.11.0.86",
+  "protobuf==4.25.9",
+  "scipy==1.14.1",
+  "uvicorn[standard]==0.54.0",
+]
+
+[project.scripts]
+vigorsync-live = "vigorsync_live.app:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]

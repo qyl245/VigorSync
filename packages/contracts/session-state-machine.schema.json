@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigorsync.local/schemas/session-state-machine.schema.json",
+  "title": "VigorSync session state machine",
+  "description": "Authoritative transition table shared by Core, Live Engine, mirror and mobile clients.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "initial",
+    "terminal",
+    "transitions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "vigorsync-session-state-machine-v1"
+    },
+    "initial": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionStatus"
+    },
+    "terminal": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionStatus"
+      }
+    },
+    "transitions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "trigger"
+        ],
+        "properties": {
+          "from": {
+            "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionStatus"
+          },
+          "to": {
+            "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/SessionStatus"
+          },
+          "trigger": {
+            "type": "string",
+            "enum": [
+              "command.start",
+              "command.pause",
+              "command.resume",
+              "command.stop",
+              "command.cancel",
+              "internal.live_ready",
+              "internal.start_failed",
+              "internal.runtime_failed",
+              "internal.finalize_accepted",
+              "internal.finalize_failed",
+              "internal.report_ready",
+              "internal.analysis_failed"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

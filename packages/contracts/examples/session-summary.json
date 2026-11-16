@@ -1,0 +1,20 @@
+{
+  "schema_version": "vigorsync-live-session-v1",
+  "session_id": "s_01JABC123",
+  "exercise": "squat",
+  "view": "side_left",
+  "started_at": "2026-11-15T10:00:03Z",
+  "ended_at": "2026-11-15T10:01:20Z",
+  "reps": 12,
+  "duration_s": 77.0,
+  "mean_confidence": 0.91,
+  "alert_counts": {
+    "squat_depth_insufficient": 2,
+    "squat_tempo_inconsistent": 1
+  },
+  "algorithm": {
+    "pose_model": "mediapipe_pose_landmarker_lite",
+    "inference_fps": 24.1,
+    "version": "0.1.0"
+  }
+}

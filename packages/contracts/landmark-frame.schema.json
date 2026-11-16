@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigorsync.local/schemas/landmark-frame.schema.json",
+  "title": "VigorSync landmark frame",
+  "description": "One line of landmarks.jsonl. Coordinates use MediaPipe normalized image coordinates.",
+  "type": "object",
+  "required": [
+    "t_ms",
+    "frame",
+    "width",
+    "height",
+    "pose_confidence",
+    "landmarks"
+  ],
+  "properties": {
+    "t_ms": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+    },
+    "frame": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/NonNegativeInteger"
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8192
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8192
+    },
+    "pose_confidence": {
+      "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/Confidence"
+    },
+    "landmarks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "x",
+          "y",
+          "z",
+          "visibility"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32
+          },
+          "x": {
+            "type": "number",
+            "description": "Horizontal normalized image coordinate.",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "y": {
+            "type": "number",
+            "description": "Vertical normalized image coordinate.",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "z": {
+            "type": "number",
+            "description": "Relative depth in normalized image units; negative is closer to the camera."
+          },
+          "visibility": {
+            "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/Confidence"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

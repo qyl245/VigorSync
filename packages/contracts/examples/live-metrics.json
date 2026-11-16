@@ -1,0 +1,17 @@
+{
+  "type": "live.metrics",
+  "version": "v1",
+  "session_id": "s_01JABC123",
+  "t_ms": 18320,
+  "seq": 172,
+  "payload": {
+    "exercise": "squat",
+    "phase": "up",
+    "reps": 8,
+    "confidence": 0.93,
+    "fps": 24.1,
+    "paused": false,
+    "joint_angle": 111.4,
+    "elapsed_s": 18.32
+  }
+}

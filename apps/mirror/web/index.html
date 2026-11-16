@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0d0c" />
+    <title>VigorSync · 动作遥测</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="mirror-shell">
+      <section id="setup-panel" class="setup-panel">
+        <div class="setup-copy">
+          <div class="brand-line">
+            <span class="brand-mark" aria-hidden="true">V/S</span>
+            <span class="brand-word">VIGORSYNC</span>
+          </div>
+          <p class="eyebrow">LOCAL MOTION LAB · M1</p>
+          <h1>让每一次<br /><em>发力可见。</em></h1>
+          <p class="lead">
+            不追逐数字。看清姿态、节奏和关节轨迹，让下一组比上一组更准确。
+          </p>
+          <div class="feature-strip" aria-label="功能特性">
+            <span><b>33</b> 关键点</span>
+            <span><b>2</b> 种动作</span>
+            <span><b>0</b> 云端依赖</span>
+          </div>
+        </div>
+
+        <form id="start-form" class="control-card">
+          <div class="card-heading">
+            <span class="step-index">01</span>
+            <div>
+              <p class="eyebrow">NEW SESSION</p>
+              <h2>配置本次训练</h2>
+            </div>
+          </div>
+
+          <div class="form-grid">
+            <label>
+              <span>动作</span>
+              <select id="exercise" name="exercise">
+                <option value="squat">深蹲</option>
+                <option value="pushup">俯卧撑</option>
+              </select>
+            </label>
+            <label>
+              <span>机位</span>
+              <select id="view" name="view">
+                <option value="side_left">左侧机位</option>
+                <option value="side_right">右侧机位</option>
+                <option value="oblique_left">左斜侧机位</option>
+                <option value="oblique_right">右斜侧机位</option>
+                <option value="front">正面机位</option>
+                <option value="rear">背面机位</option>
+              </select>
+            </label>
+            <label>
+              <span>目标次数</span>
+              <input id="target-reps" name="target_reps" type="number" min="1" max="500" value="12" />
+            </label>
+          </div>
+
+          <p class="field-hint">目标用于进度反馈，不会在达成时强制结束训练。</p>
+          <button id="start-button" class="primary-button" type="submit">
+            <span id="start-label">启动实时捕捉</span>
+            <span class="button-arrow" aria-hidden="true">↗</span>
+          </button>
+          <p id="setup-error" class="setup-error" role="alert"></p>
+          <p class="privacy-note">所有画面、姿态与指标仅在本机处理。</p>
+        </form>
+      </section>
+
+      <section id="training-panel" class="training-panel" hidden>
+        <img id="stream" class="camera-stream" alt="实时训练画面" />
+        <div class="vignette" aria-hidden="true"></div>
+        <div class="scan-grid" aria-hidden="true"></div>
+
+        <header class="training-header">
+          <div class="live-identity">
+            <span class="brand-mark compact" aria-hidden="true">V/S</span>
+            <div>
+              <p class="eyebrow">LIVE MOTION</p>
+              <h2 id="exercise-name">深蹲</h2>
+            </div>
+          </div>
+
+          <div class="session-status">
+            <div id="connection-badge" class="connection-badge">准备相机</div>
+            <div class="session-clock">
+              <span>训练计时</span>
+              <strong id="elapsed-time">00:00</strong>
+            </div>
+          </div>
+        </header>
+
+        <aside class="angle-card">
+          <div class="metric-heading">
+            <span class="metric-index">A</span>
+            <span id="joint-name">膝关节角度</span>
+          </div>
+          <div class="angle-reading">
+            <strong id="angle-value">--</strong>
+            <span>°</span>
+          </div>
+          <div class="angle-track">
+            <span id="angle-marker" class="angle-marker"></span>
+          </div>
+          <div class="angle-scale">
+            <span>折叠</span>
+            <span>伸展</span>
+          </div>
+          <div class="phase-row">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            <strong id="phase-label">等待姿态</strong>
+          </div>
+        </aside>
+
+        <section class="rep-cluster" aria-label="动作次数">
+          <div class="rep-heading">
+            <span>REPETITIONS</span>
+            <span id="target-progress-text">0 / 12</span>
+          </div>
+          <div class="rep-reading">
+            <strong id="rep-count">0</strong>
+            <span>次</span>
+          </div>
+          <div class="target-track">
+            <span id="target-progress" class="target-progress"></span>
+          </div>
+          <div class="telemetry-row">
+            <span id="confidence-label">置信度 --</span>
+            <span id="fps-label">推理 -- FPS</span>
+          </div>
+        </section>
+
+        <div id="alert" class="alert-card" hidden>
+          <span class="alert-kicker">FORM SIGNAL</span>
+          <strong id="alert-message"></strong>
+        </div>
+
+        <footer class="training-controls">
+          <button id="pause-button" class="secondary-button" type="button">暂停</button>
+          <button id="stop-button" class="danger-button" type="button">结束训练</button>
+        </footer>
+      </section>
+
+      <section id="summary-panel" class="summary-panel" hidden>
+        <div class="summary-copy">
+          <p class="eyebrow">SESSION COMPLETE</p>
+          <h1>这一组，<br /><em>已经留下轨迹。</em></h1>
+          <p>视频与姿态数据已写入本机，后续可交给离线 RepChain 做精细复盘。</p>
+        </div>
+        <div class="summary-card">
+          <div class="summary-grid">
+            <div><span>完成次数</span><strong id="summary-reps">0</strong></div>
+            <div><span>训练时长</span><strong id="summary-duration">00:00</strong></div>
+            <div><span>平均置信度</span><strong id="summary-confidence">--</strong></div>
+            <div><span>推理帧率</span><strong id="summary-fps">--</strong></div>
+          </div>
+          <p id="summary-path" class="summary-path"></p>
+          <button id="restart-button" class="primary-button" type="button">
+            <span>再来一组</span>
+            <span class="button-arrow" aria-hidden="true">↗</span>
+          </button>
+        </div>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>
