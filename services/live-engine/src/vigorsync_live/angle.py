@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -34,6 +35,13 @@ JOINT_TRIPLETS = {
         "left": (11, 13, 15),
         "right": (12, 14, 16),
     },
+}
+
+PUSHUP_POSTURE_LANDMARKS = {
+    "side_left": ((11, 27), (12, 28), (11, 23), (12, 24)),
+    "oblique_left": ((11, 27), (12, 28), (11, 23), (12, 24)),
+    "side_right": ((12, 28), (11, 27), (12, 24), (11, 23)),
+    "oblique_right": ((12, 28), (11, 27), (12, 24), (11, 23)),
 }
 
 
@@ -129,3 +137,37 @@ def calculate_primary_angle(
         left,
         right,
     )
+
+
+def pushup_posture_valid(
+    landmarks: Sequence[Landmark],
+    view: str,
+    frame_width: int,
+    frame_height: int,
+    min_visibility: float = 0.5,
+    max_vertical_deg: float = 35.0,
+) -> bool:
+    """Reject side-view push-up reps performed while standing or walking away."""
+    candidates = PUSHUP_POSTURE_LANDMARKS.get(view)
+    if candidates is None:
+        return True
+    by_id = {landmark.id: landmark for landmark in landmarks}
+    evaluated = False
+    for index, (first_id, second_id) in enumerate(candidates):
+        try:
+            first = by_id[first_id]
+            second = by_id[second_id]
+        except KeyError:
+            continue
+        if min(first.visibility, second.visibility) < min_visibility:
+            continue
+        evaluated = True
+        horizontal = abs(first.x - second.x) * max(1, frame_width)
+        vertical = abs(first.y - second.y) * max(1, frame_height)
+        body_angle = math.degrees(
+            math.atan2(vertical, max(horizontal, 1e-6))
+        )
+        limit = max_vertical_deg if index < 2 else 60.0
+        if body_angle <= limit:
+            return True
+    return not evaluated

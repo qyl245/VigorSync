@@ -33,16 +33,22 @@ WEB_ROOT = SOURCE_ROOT / "apps" / "mirror" / "web"
 RUNTIME_ROOT = DATA_ROOT / "webdata" / "runtime"
 SESSION_ROOT = DATA_ROOT / "webdata" / "sessions"
 LIVE_SOURCE = SOURCE_ROOT / "services" / "live-engine" / "src"
+CORE_SOURCE = SOURCE_ROOT / "services" / "core-api" / "src"
 APP_TITLE = "VigorSync · 动作遥测"
 LIVE_URL = "http://127.0.0.1:8020"
 MIRROR_URL = "http://127.0.0.1:8080"
+CORE_URL = "http://127.0.0.1:8011"
+CORE_HOST = os.getenv("VIGORSYNC_CORE_HOST", "0.0.0.0")
 
 os.environ.setdefault("VIGORSYNC_PROJECT_ROOT", str(DATA_ROOT))
 os.environ.setdefault("VIGORSYNC_SESSION_ROOT", str(SESSION_ROOT))
 os.environ.setdefault("VIGORSYNC_LIVE_HOST", "127.0.0.1")
 os.environ.setdefault("VIGORSYNC_LIVE_PORT", "8020")
+os.environ.setdefault("VIGORSYNC_CORE_URL", CORE_URL)
 if str(LIVE_SOURCE) not in sys.path:
     sys.path.insert(0, str(LIVE_SOURCE))
+if str(CORE_SOURCE) not in sys.path:
+    sys.path.insert(0, str(CORE_SOURCE))
 
 
 class QuietMirrorHandler(SimpleHTTPRequestHandler):
@@ -91,17 +97,51 @@ class DesktopHost:
     def __init__(self) -> None:
         self.live_server: Any = None
         self.live_thread: threading.Thread | None = None
+        self.core_server: Any = None
+        self.core_thread: threading.Thread | None = None
         self.mirror_server: ThreadingHTTPServer | None = None
         self.mirror_thread: threading.Thread | None = None
         self.manages_live = False
+        self.manages_core = False
         self.manages_mirror = False
         self.allow_close = False
 
     def start(self) -> None:
         RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
         SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+        self._start_core()
         self._start_live()
         self._start_mirror()
+
+    def _start_core(self) -> None:
+        health_url = f"{CORE_URL}/api/v1/health"
+        if http_ok(health_url):
+            logging.info("Attached to an existing Core API")
+            return
+        try:
+            import uvicorn
+
+            from vigorsync_core.app import app as core_app
+        except Exception as exc:
+            raise RuntimeError(f"cannot load Core API: {exc}") from exc
+        config = uvicorn.Config(
+            core_app,
+            host=CORE_HOST,
+            port=8011,
+            log_level="warning",
+            access_log=False,
+        )
+        self.core_server = uvicorn.Server(config)
+        self.core_thread = threading.Thread(
+            target=self.core_server.run,
+            name="vigorsync-desktop-core",
+            daemon=True,
+        )
+        self.core_thread.start()
+        self.manages_core = True
+        if not wait_until(lambda: http_ok(health_url)):
+            raise RuntimeError("Core API failed to start")
+        logging.info("Core API started")
 
     def _start_live(self) -> None:
         health_url = f"{LIVE_URL}/api/v1/health"
@@ -153,15 +193,27 @@ class DesktopHost:
 
     def active_sessions(self) -> list[str]:
         try:
-            payload = read_json(f"{LIVE_URL}/api/v1/health")
-            return list(payload.get("active_sessions") or [])
+            payload = read_json(f"{CORE_URL}/dev/v1/sessions")
+            return [
+                item["session_id"]
+                for item in payload.get("items", [])
+                if item.get("status")
+                in {"created", "preparing", "active", "paused", "stopping"}
+            ]
         except Exception:
-            return []
+            try:
+                payload = read_json(f"{LIVE_URL}/api/v1/health")
+                return list(payload.get("active_sessions") or [])
+            except Exception:
+                return []
 
     def stop_active_sessions(self) -> None:
         for session_id in self.active_sessions():
             try:
-                post_json(f"{LIVE_URL}/dev/v1/sessions/{session_id}/stop")
+                try:
+                    post_json(f"{CORE_URL}/dev/v1/sessions/{session_id}/stop")
+                except Exception:
+                    post_json(f"{LIVE_URL}/dev/v1/sessions/{session_id}/stop")
                 logging.info("Stopped session %s before exit", session_id)
             except Exception:
                 logging.exception("Failed to stop session %s", session_id)
@@ -198,6 +250,10 @@ class DesktopHost:
             self.mirror_server.server_close()
         if self.mirror_thread is not None:
             self.mirror_thread.join(timeout=3.0)
+        if self.manages_core and self.core_server is not None:
+            self.core_server.should_exit = True
+        if self.core_thread is not None:
+            self.core_thread.join(timeout=8.0)
         logging.info("Desktop host stopped")
 
 

@@ -1,0 +1,62 @@
+"""Configuration for the VigorSync Core API."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    project_root: Path
+    db_path: Path
+    session_root: Path
+    host: str = "0.0.0.0"
+    port: int = 8011
+    live_url: str = "http://127.0.0.1:8020"
+    live_internal_token: str | None = None
+    mirror_token: str = "vigorsync-mirror-dev"
+    pairing_code: str = "482913"
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        project_root = Path(
+            os.getenv("VIGORSYNC_PROJECT_ROOT", str(PROJECT_ROOT))
+        ).resolve()
+        webdata = Path(
+            os.getenv("VIGORSYNC_WEBDATA_ROOT", str(project_root / "webdata"))
+        ).resolve()
+        return cls(
+            project_root=project_root,
+            db_path=Path(
+                os.getenv("VIGORSYNC_CORE_DB", str(webdata / "core" / "core.db"))
+            ).resolve(),
+            session_root=Path(
+                os.getenv(
+                    "VIGORSYNC_SESSION_ROOT",
+                    str(webdata / "sessions"),
+                )
+            ).resolve(),
+            host=os.getenv("VIGORSYNC_CORE_HOST", "0.0.0.0"),
+            port=int(os.getenv("VIGORSYNC_CORE_PORT", "8011")),
+            live_url=os.getenv(
+                "VIGORSYNC_LIVE_URL",
+                "http://127.0.0.1:8020",
+            ).rstrip("/"),
+            live_internal_token=(
+                os.getenv("VIGORSYNC_LIVE_INTERNAL_TOKEN") or None
+            ),
+            mirror_token=os.getenv(
+                "VIGORSYNC_MIRROR_TOKEN",
+                "vigorsync-mirror-dev",
+            ),
+            pairing_code=os.getenv("VIGORSYNC_PAIRING_CODE", "482913"),
+        )
+
+    def ensure_directories(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.session_root.mkdir(parents=True, exist_ok=True)

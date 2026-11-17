@@ -1,5 +1,5 @@
 const query = new URLSearchParams(window.location.search);
-const ENGINE_URL = (query.get("engine") || "http://127.0.0.1:8020").replace(/\/$/, "");
+const CORE_URL = (query.get("core") || "http://127.0.0.1:8011").replace(/\/$/, "");
 
 const elements = {
   setupPanel: document.querySelector("#setup-panel"),
@@ -52,8 +52,13 @@ const phaseNames = {
 
 let currentSession = null;
 let websocket = null;
+let mirrorSocket = null;
+let mirrorToken = null;
 let reconnectTimer = null;
+let mirrorReconnectTimer = null;
 let alertTimer = null;
+let syncingSession = false;
+let summarySessionId = null;
 let lastMetrics = {
   reps: 0,
   confidence: 0,
@@ -70,7 +75,7 @@ const jointNames = {
 };
 
 async function request(path, options = {}) {
-  const response = await fetch(`${ENGINE_URL}${path}`, {
+  const response = await fetch(`${CORE_URL}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -85,6 +90,12 @@ async function request(path, options = {}) {
     throw new Error(message);
   }
   return response.json();
+}
+
+async function ensureBootstrap() {
+  if (mirrorToken) return;
+  const bootstrap = await request("/dev/v1/bootstrap");
+  mirrorToken = bootstrap.mirror_token;
 }
 
 function setLoading(loading, text = "正在打开摄像头…") {
@@ -147,44 +158,204 @@ function setConnection(text, online = false) {
   elements.connectionBadge.classList.toggle("online", online);
 }
 
-function connectWebSocket() {
-  if (!currentSession) return;
+function applyDraftConfig(config) {
+  if (!config) return;
+  if (["squat", "pushup"].includes(config.exercise)) {
+    elements.exercise.value = config.exercise;
+  }
+  if (
+    [
+      "front",
+      "rear",
+      "oblique_left",
+      "oblique_right",
+      "side_left",
+      "side_right",
+      "unknown",
+    ].includes(config.view)
+  ) {
+    elements.view.value = config.view;
+  }
+  const target = Number(config.target_reps);
+  if (Number.isInteger(target) && target >= 1 && target <= 500) {
+    elements.targetReps.value = String(target);
+  }
+}
+
+function isLiveStatus(status) {
+  return ["created", "preparing", "active", "paused"].includes(status);
+}
+
+function resetMetrics() {
+  lastMetrics = {
+    reps: 0,
+    confidence: 0,
+    fps: 0,
+    phase: "unknown",
+    paused: false,
+    joint_angle: null,
+    elapsed_s: 0,
+  };
+}
+
+function closeLiveSocket() {
   window.clearTimeout(reconnectTimer);
-  if (websocket) websocket.close();
-  websocket = new WebSocket(currentSession.ws_url);
-  websocket.addEventListener("open", () => setConnection("实时连接", true));
-  websocket.addEventListener("message", (event) => {
+  reconnectTimer = null;
+  if (!websocket) return;
+  const closing = websocket;
+  websocket = null;
+  closing.close();
+}
+
+function connectLiveSocket() {
+  if (!currentSession?.ws_url || !isLiveStatus(currentSession.status)) return;
+  if (
+    websocket &&
+    (websocket.readyState === WebSocket.OPEN ||
+      websocket.readyState === WebSocket.CONNECTING) &&
+    websocket.url === currentSession.ws_url
+  ) {
+    return;
+  }
+  closeLiveSocket();
+  const socket = new WebSocket(currentSession.ws_url);
+  websocket = socket;
+  socket.addEventListener("open", () => {
+    if (websocket === socket) setConnection("实时连接", true);
+  });
+  socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
+    if (message.session_id && message.session_id !== currentSession?.session_id) {
+      return;
+    }
     if (message.type === "live.metrics") {
       updateMetrics(message.payload);
     } else if (message.type === "form.alert") {
       showAlert(message.payload.message);
     } else if (message.type === "session.state") {
-      if (message.payload.status === "failed") {
-        setConnection("发生错误");
-        showAlert("实时引擎发生错误，请结束本次训练后重试。");
-      } else if (message.payload.status === "paused") {
-        elements.pauseButton.textContent = "继续";
-      } else if (message.payload.status === "active") {
-        elements.pauseButton.textContent = "暂停";
-      }
+      handleSessionState(message.session_id, message.payload);
     }
   });
-  websocket.addEventListener("close", () => {
+  socket.addEventListener("close", () => {
+    if (websocket !== socket) return;
+    websocket = null;
     setConnection("连接中断");
-    if (currentSession) {
-      reconnectTimer = window.setTimeout(connectWebSocket, 1200);
+    if (currentSession && isLiveStatus(currentSession.status)) {
+      reconnectTimer = window.setTimeout(connectLiveSocket, 1200);
     }
   });
 }
 
+function connectMirrorSocket() {
+  if (!mirrorToken) return;
+  if (
+    mirrorSocket &&
+    (mirrorSocket.readyState === WebSocket.OPEN ||
+      mirrorSocket.readyState === WebSocket.CONNECTING)
+  ) {
+    return;
+  }
+  window.clearTimeout(mirrorReconnectTimer);
+  const wsUrl = CORE_URL.replace(/^http/, "ws") + "/api/v1/ws/mirror";
+  const socket = new WebSocket(wsUrl, [
+    "vigorsync.v1",
+    `vigorsync.token.${mirrorToken}`,
+  ]);
+  mirrorSocket = socket;
+  socket.addEventListener("open", () => {
+    syncCurrentSession().catch(() => {});
+  });
+  socket.addEventListener("message", (event) => {
+    handleMirrorMessage(JSON.parse(event.data));
+  });
+  socket.addEventListener("close", () => {
+    if (mirrorSocket !== socket) return;
+    mirrorSocket = null;
+    mirrorReconnectTimer = window.setTimeout(connectMirrorSocket, 1200);
+  });
+}
+
+function handleMirrorMessage(message) {
+  if (message.type === "session.config") {
+    applyDraftConfig(message.payload);
+    return;
+  }
+  if (
+    message.type === "session.dismissed" &&
+    currentSession?.session_id === message.session_id
+  ) {
+    restart();
+    return;
+  }
+  if (
+    message.type === "session.deleted" &&
+    currentSession?.session_id === message.session_id
+  ) {
+    restart();
+    return;
+  }
+  if (message.type === "session.start" && message.session_id) {
+    const session = {
+      status: "preparing",
+      ...message.payload,
+      session_id: message.session_id,
+    };
+    attachSession(session).catch((error) => {
+      setConnection("启动异常");
+      showAlert(error.message);
+    });
+    return;
+  }
+  if (
+    !currentSession ||
+    !message.session_id ||
+    message.session_id !== currentSession.session_id
+  ) {
+    return;
+  }
+  if (message.type === "live.metrics") {
+    updateMetrics(message.payload);
+  } else if (message.type === "form.alert") {
+    showAlert(message.payload.message);
+  } else if (message.type === "session.state") {
+    handleSessionState(message.session_id, message.payload);
+  }
+}
+
+function handleSessionState(sessionId, payload) {
+  if (!currentSession || currentSession.session_id !== sessionId) return;
+  const status = payload?.status;
+  if (!status) return;
+  currentSession = { ...currentSession, status };
+  if (status === "paused") {
+    elements.pauseButton.textContent = "继续";
+    elements.phaseLabel.textContent = "已暂停";
+  } else if (status === "active") {
+    elements.pauseButton.textContent = "暂停";
+    setConnection("实时连接", true);
+  } else if (status === "failed") {
+    setConnection("发生错误");
+    showAlert("实时引擎发生错误，请结束本次训练后重试。");
+  } else if (["analyzing", "completed", "cancelled"].includes(status)) {
+    showSummary(sessionId).catch((error) => {
+      setConnection("会话已结束");
+      showAlert(error.message);
+    });
+  }
+}
+
 async function waitUntilReady(sessionId) {
   for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (currentSession?.session_id !== sessionId) return;
     const session = await request(`/dev/v1/sessions/${sessionId}`);
+    if (currentSession?.session_id !== sessionId) return;
     currentSession = { ...currentSession, ...session };
     if (session.status === "active") {
-      elements.stream.src = `${session.stream_url}?t=${Date.now()}`;
       setConnection("实时连接", true);
+      return;
+    }
+    if (session.status === "paused") {
+      elements.pauseButton.textContent = "继续";
       return;
     }
     if (session.status === "failed") {
@@ -195,11 +366,88 @@ async function waitUntilReady(sessionId) {
   throw new Error("启动超时，请检查摄像头是否被其他程序占用");
 }
 
+async function attachSession(session, { waitForReady = true } = {}) {
+  if (!session?.session_id) return;
+  const changedSession = currentSession?.session_id !== session.session_id;
+  const enteringTraining = changedSession || elements.trainingPanel.hidden;
+  if (changedSession) {
+    closeLiveSocket();
+    resetMetrics();
+    summarySessionId = null;
+    currentSession = session;
+  } else {
+    currentSession = { ...currentSession, ...session };
+  }
+
+  elements.setupPanel.hidden = true;
+  elements.summaryPanel.hidden = true;
+  elements.trainingPanel.hidden = false;
+  elements.exerciseName.textContent =
+    exerciseNames[currentSession.exercise] || currentSession.exercise;
+  elements.jointName.textContent =
+    jointNames[currentSession.exercise] || "关节角度";
+  applyDraftConfig(currentSession);
+  if (enteringTraining) {
+    elements.targetProgressText.textContent =
+      `0 / ${currentSession.target_reps}`;
+    elements.repCount.textContent = "0";
+    elements.elapsedTime.textContent = "00:00";
+    elements.angleValue.textContent = "--";
+    elements.angleMarker.style.width = "0%";
+    elements.phaseLabel.textContent =
+      currentSession.status === "paused" ? "已暂停" : "准备相机";
+  }
+  elements.pauseButton.textContent =
+    currentSession.status === "paused" ? "继续" : "暂停";
+  elements.repCluster.classList.remove("target-hit");
+
+  if (elements.stream.dataset.sessionId !== currentSession.session_id) {
+    if (currentSession.stream_url) {
+      elements.stream.dataset.sessionId = currentSession.session_id;
+      elements.stream.src = `${currentSession.stream_url}?t=${Date.now()}`;
+    }
+  }
+  if (currentSession.status === "active") {
+    setConnection("实时连接", true);
+  } else {
+    setConnection("准备相机");
+  }
+  connectLiveSocket();
+  if (waitForReady && currentSession.status === "preparing") {
+    await waitUntilReady(currentSession.session_id);
+  }
+}
+
+async function syncCurrentSession() {
+  if (!mirrorToken || syncingSession) return;
+  syncingSession = true;
+  try {
+    const response = await request("/dev/v1/sessions");
+    const active = response.items?.find((item) => isLiveStatus(item.status));
+    if (active) {
+      const detail = await request(`/dev/v1/sessions/${active.session_id}`);
+      await attachSession(detail);
+      return;
+    }
+    if (currentSession && isLiveStatus(currentSession.status)) {
+      const detail = await request(
+        `/dev/v1/sessions/${currentSession.session_id}`,
+      );
+      if (!isLiveStatus(detail.status)) {
+        await showSummary(detail.session_id, detail);
+      }
+    }
+  } finally {
+    syncingSession = false;
+  }
+}
+
 async function startSession(event) {
   event.preventDefault();
   showSetupError("");
   setLoading(true);
   try {
+    await ensureBootstrap();
     const target = Math.max(1, Number(elements.targetReps.value) || 12);
     const session = await request("/dev/v1/sessions", {
       method: "POST",
@@ -209,26 +457,13 @@ async function startSession(event) {
         target_reps: target,
       }),
     });
-    currentSession = session;
-    elements.setupPanel.hidden = true;
-    elements.summaryPanel.hidden = true;
-    elements.trainingPanel.hidden = false;
-    elements.exerciseName.textContent = exerciseNames[session.exercise];
-    elements.jointName.textContent = jointNames[session.exercise];
-    elements.repCount.textContent = "0";
-    elements.elapsedTime.textContent = "00:00";
-    elements.angleValue.textContent = "--";
-    elements.angleMarker.style.width = "0%";
-    elements.repCluster.classList.remove("target-hit");
-    elements.phaseLabel.textContent = "准备相机";
-    setConnection("准备相机");
-    updateMetrics(session.metrics);
-    await waitUntilReady(session.session_id);
-    connectWebSocket();
+    await attachSession(session);
   } catch (error) {
     showSetupError(error.message);
-    elements.trainingPanel.hidden = true;
-    elements.setupPanel.hidden = false;
+    if (!currentSession) {
+      elements.trainingPanel.hidden = true;
+      elements.setupPanel.hidden = false;
+    }
   } finally {
     setLoading(false);
   }
@@ -260,35 +495,56 @@ async function stopSession() {
       `/dev/v1/sessions/${currentSession.session_id}/stop`,
       { method: "POST", body: "{}" },
     );
-    window.clearTimeout(reconnectTimer);
-    if (websocket) {
-      const closing = websocket;
-      websocket = null;
-      closing.close();
-    }
-    elements.stream.removeAttribute("src");
-    elements.trainingPanel.hidden = true;
-    elements.summaryPanel.hidden = false;
-    elements.summaryReps.textContent = String(lastMetrics.reps ?? 0);
-    elements.summaryDuration.textContent = formatDuration(lastMetrics.elapsed_s);
-    elements.summaryConfidence.textContent = lastMetrics.confidence
-      ? `${Math.round(lastMetrics.confidence * 100)}%`
-      : "--";
-    elements.summaryFps.textContent = lastMetrics.fps
-      ? `${Number(lastMetrics.fps).toFixed(1)} FPS`
-      : "--";
-    elements.summaryPath.textContent = result.artifacts?.summary_path || "";
+    await showSummary(result.session_id, result);
   } catch (error) {
     showAlert(error.message);
   } finally {
-    currentSession = null;
     elements.stopButton.disabled = false;
     elements.stopButton.textContent = "结束训练";
   }
 }
 
+async function showSummary(sessionId, detail = null) {
+  if (summarySessionId === sessionId) return;
+  const session =
+    detail ||
+    (await request(`/dev/v1/sessions/${sessionId}`));
+  summarySessionId = sessionId;
+  currentSession = {
+    ...(currentSession?.session_id === sessionId ? currentSession : {}),
+    ...session,
+    status: session.status || "analyzing",
+  };
+  closeLiveSocket();
+  elements.stream.removeAttribute("src");
+  delete elements.stream.dataset.sessionId;
+  elements.trainingPanel.hidden = true;
+  elements.setupPanel.hidden = true;
+  elements.summaryPanel.hidden = false;
+
+  const summary = session.live_summary || {};
+  const reps = summary.reps ?? lastMetrics.reps;
+  const duration = summary.duration_s ?? lastMetrics.elapsed_s;
+  const confidence = summary.mean_confidence ?? lastMetrics.confidence;
+  const fps = summary.algorithm?.inference_fps ?? lastMetrics.fps;
+  elements.summaryReps.textContent = String(reps ?? 0);
+  elements.summaryDuration.textContent = formatDuration(duration);
+  elements.summaryConfidence.textContent = confidence
+    ? `${Math.round(Number(confidence) * 100)}%`
+    : "--";
+  elements.summaryFps.textContent = fps
+    ? `${Number(fps).toFixed(1)} FPS`
+    : "--";
+  elements.summaryPath.textContent = session.artifacts?.summary_path || "";
+}
+
 function restart() {
-  window.clearTimeout(reconnectTimer);
+  closeLiveSocket();
+  currentSession = null;
+  summarySessionId = null;
+  resetMetrics();
+  elements.stream.removeAttribute("src");
+  delete elements.stream.dataset.sessionId;
   elements.summaryPanel.hidden = true;
   elements.setupPanel.hidden = false;
   elements.setupError.textContent = "";
@@ -299,3 +555,19 @@ elements.startForm.addEventListener("submit", startSession);
 elements.pauseButton.addEventListener("click", togglePause);
 elements.stopButton.addEventListener("click", stopSession);
 elements.restartButton.addEventListener("click", restart);
+
+async function initializeMirror() {
+  try {
+    await ensureBootstrap();
+    try {
+      applyDraftConfig(await request("/dev/v1/config"));
+    } catch {
+      // Keep the local defaults when the optional draft endpoint is unavailable.
+    }
+    connectMirrorSocket();
+  } catch (error) {
+    showSetupError(`Core API 不可用：${error.message}`);
+  }
+}
+
+initializeMirror();

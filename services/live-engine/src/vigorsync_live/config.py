@@ -42,6 +42,8 @@ class Settings:
     allowed_origins: tuple[str, ...]
     inference_fps: float = 20.0
     preview_fps: float = 15.0
+    core_url: str | None = None
+    core_internal_token: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -113,6 +115,8 @@ class Settings:
                     float(os.getenv("VIGORSYNC_PREVIEW_FPS", "15")),
                 ),
             ),
+            core_url=os.getenv("VIGORSYNC_CORE_URL") or None,
+            core_internal_token=os.getenv("VIGORSYNC_CORE_INTERNAL_TOKEN") or None,
         )
 
     def ensure_directories(self) -> None:

@@ -135,6 +135,10 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertEqual("finalized", result["status"])
             self.assertGreaterEqual(runtime.latest_metrics["reps"], 1)
+            self.assertTrue(
+                {"camera_open_ms", "first_frame_ms", "pose_init_ms", "active_ms"}
+                <= set(runtime.startup_timings)
+            )
             for artifact in result["artifacts"].values():
                 path = Path(artifact)
                 self.assertTrue(path.is_file(), artifact)

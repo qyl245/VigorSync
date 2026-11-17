@@ -9,3 +9,5 @@ services/live-engine/smoke-output/
 build/
 dist/
 *.spec
+.playwright-cli/
+output/

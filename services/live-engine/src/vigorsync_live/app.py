@@ -77,6 +77,7 @@ def _session_payload(runtime: SessionRuntime) -> dict:
         "ws_url": f"ws://127.0.0.1:{settings.port}/ws/live/{session_id}",
         "metrics": runtime.latest_metrics,
         "counts": runtime.counts,
+        "startup_timings": runtime.startup_timings,
         "error": runtime.error,
     }
 

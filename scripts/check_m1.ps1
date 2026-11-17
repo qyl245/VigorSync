@@ -14,7 +14,10 @@ try {
     & $python -B -m unittest discover -s tests\contracts -v
     if ($LASTEXITCODE -ne 0) { throw "Contract tests failed." }
 
-    $env:PYTHONPATH = "services\live-engine\src"
+    $env:PYTHONPATH = "services\live-engine\src;services\core-api\src"
+    & $python -B -m unittest discover -s services\core-api\tests -v
+    if ($LASTEXITCODE -ne 0) { throw "Core API tests failed." }
+
     & $python -B -m unittest discover -s services\live-engine\tests -v
     if ($LASTEXITCODE -ne 0) { throw "M1 tests failed." }
 

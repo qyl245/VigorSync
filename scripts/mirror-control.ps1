@@ -11,12 +11,15 @@ $runtimeDir = Join-Path $projectRoot "webdata\runtime"
 $statePath = Join-Path $runtimeDir "mirror-state.json"
 $liveLog = Join-Path $runtimeDir "live-engine.log"
 $liveErr = Join-Path $runtimeDir "live-engine.err.log"
+$coreLog = Join-Path $runtimeDir "core-api.log"
+$coreErr = Join-Path $runtimeDir "core-api.err.log"
 $mirrorLog = Join-Path $runtimeDir "mirror.log"
 $mirrorErr = Join-Path $runtimeDir "mirror.err.log"
 $browserProfile = Join-Path $runtimeDir "browser-profile"
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $mirrorUrl = "http://127.0.0.1:8080"
 $liveHealth = "http://127.0.0.1:8020/api/v1/health"
+$coreHealth = "http://127.0.0.1:8011/api/v1/health"
 
 function Test-HttpOk {
     param([string]$Url)
@@ -131,6 +134,7 @@ function Stop-ManagedMirror {
 
     Stop-ExactProcess -ProcessId ([int]$state.mirrorPid) -ExpectedText "apps\mirror\server.py"
     Stop-ExactProcess -ProcessId ([int]$state.livePid) -ExpectedText "vigorsync_live"
+    Stop-ExactProcess -ProcessId ([int]$state.corePid) -ExpectedText "vigorsync_core"
 
     Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
     Write-Host "VigorSync mirror stopped."
@@ -142,8 +146,10 @@ function Show-Status {
         managed = $null -ne $state
         live_port_owner = Get-PortOwner -Port 8020
         mirror_port_owner = Get-PortOwner -Port 8080
+        core_port_owner = Get-PortOwner -Port 8011
         live_ready = Test-HttpOk -Url $liveHealth
         mirror_ready = Test-HttpOk -Url $mirrorUrl
+        core_ready = Test-HttpOk -Url $coreHealth
         url = $mirrorUrl
     } | Format-List
 }
@@ -171,6 +177,7 @@ if ($null -eq $state) {
         startedAt = $null
         livePid = $null
         mirrorPid = $null
+        corePid = $null
         browserProfile = $browserProfile
     }
 }
@@ -178,14 +185,45 @@ $state.startedAt = (Get-Date).ToString("o")
 
 $startedLive = $null
 $startedMirror = $null
+$startedCore = $null
 
 try {
+    if (-not (Test-HttpOk -Url $coreHealth)) {
+        if (Get-PortOwner -Port 8011) {
+            throw "Port 8011 is occupied but the VigorSync Core API health check failed."
+        }
+        $oldPythonPath = $env:PYTHONPATH
+        $env:PYTHONPATH = Join-Path $projectRoot "services\core-api\src"
+        try {
+            $startedCore = Start-Process `
+                -FilePath $python `
+                -ArgumentList @("-m", "vigorsync_core") `
+                -WorkingDirectory $projectRoot `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput $coreLog `
+                -RedirectStandardError $coreErr `
+                -PassThru
+        }
+        finally {
+            $env:PYTHONPATH = $oldPythonPath
+        }
+        $state.corePid = $startedCore.Id
+        if (-not (Wait-Until -Condition { Test-HttpOk -Url $coreHealth })) {
+            throw "Core API did not become ready. Check $coreErr"
+        }
+        $state.corePid = Get-PortOwner -Port 8011
+    }
+
     if (-not (Test-HttpOk -Url $liveHealth)) {
         if (Get-PortOwner -Port 8020) {
             throw "Port 8020 is occupied but the VigorSync Live Engine health check failed."
         }
         $oldPythonPath = $env:PYTHONPATH
-        $env:PYTHONPATH = Join-Path $projectRoot "services\live-engine\src"
+        $env:PYTHONPATH = @(
+            (Join-Path $projectRoot "services\live-engine\src"),
+            (Join-Path $projectRoot "services\core-api\src")
+        ) -join [IO.Path]::PathSeparator
+        $env:VIGORSYNC_CORE_URL = "http://127.0.0.1:8011"
         try {
             $startedLive = Start-Process `
                 -FilePath $python `
@@ -260,6 +298,10 @@ catch {
     if ($startedLive) {
         $liveOwner = Get-PortOwner -Port 8020
         Stop-ExactProcess -ProcessId $liveOwner -ExpectedText "vigorsync_live"
+    }
+    if ($startedCore) {
+        $coreOwner = Get-PortOwner -Port 8011
+        Stop-ExactProcess -ProcessId $coreOwner -ExpectedText "vigorsync_core"
     }
     throw
 }

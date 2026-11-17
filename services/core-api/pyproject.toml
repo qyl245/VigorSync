@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vigorsync-core"
+version = "0.1.0"
+description = "VigorSync session and pairing API"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.162.0",
+  "httpx==0.28.1",
+  "httpx2==2.16.2",
+  "uvicorn[standard]==0.54.0",
+]
+
+[project.scripts]
+vigorsync-core = "vigorsync_core.app:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]

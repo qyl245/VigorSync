@@ -23,10 +23,18 @@ def feed(
     end_ms: int,
     step_ms: int = 50,
     confidence: float = 0.95,
+    posture_valid: bool = True,
 ):
     events = []
     for t_ms in range(start_ms, end_ms + 1, step_ms):
-        events.extend(machine.update(t_ms, angle, confidence))
+        events.extend(
+            machine.update(
+                t_ms,
+                angle,
+                confidence,
+                posture_valid=posture_valid,
+            )
+        )
     return events
 
 
@@ -94,6 +102,49 @@ class StateMachineTests(unittest.TestCase):
         self.assertEqual(0.80, right.min_rep_s)
         self.assertEqual(145.0, left.up_enter)
         self.assertEqual(0.30, left.min_rep_s)
+        self.assertEqual(1.1, left.rep_cooldown_s)
+
+    def test_left_pushup_ignores_fast_rebound(self) -> None:
+        machine = StateMachine(
+            "pushup",
+            view="side_left",
+            smoothing_alpha=1.0,
+        )
+        feed(machine, 160, 0, 100)
+        feed(machine, 130, 200, 500)
+        feed(machine, 160, 700, 800)
+        self.assertEqual(1, machine.reps)
+
+        feed(machine, 130, 900, 1200)
+        feed(machine, 160, 1400, 1500)
+        self.assertEqual(1, machine.reps, "fast rebound must not count twice")
+
+        feed(machine, 130, 1700, 2000)
+        feed(machine, 160, 2300, 2400)
+        self.assertEqual(2, machine.reps)
+
+    def test_pushup_does_not_count_while_standing(self) -> None:
+        machine = StateMachine(
+            "pushup",
+            view="side_right",
+            smoothing_alpha=1.0,
+        )
+        feed(machine, 160, 0, 100)
+        feed(machine, 120, 200, 500)
+        feed(machine, 160, 700, 800, posture_valid=False)
+        self.assertEqual(0, machine.reps)
+
+    def test_pushup_standing_bottom_is_rejected(self) -> None:
+        machine = StateMachine(
+            "pushup",
+            view="side_right",
+            smoothing_alpha=1.0,
+        )
+        feed(machine, 160, 0, 100)
+        feed(machine, 137, 200, 250)
+        feed(machine, 120, 300, 500, posture_valid=False)
+        feed(machine, 160, 700, 800, posture_valid=False)
+        self.assertEqual(0, machine.reps)
 
 
 if __name__ == "__main__":

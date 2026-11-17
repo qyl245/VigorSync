@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 import time
@@ -14,9 +15,10 @@ from typing import Any, Callable, Protocol
 import cv2
 import numpy as np
 
-from .angle import AngleObservation
+from .angle import AngleObservation, pushup_posture_valid
 from .capture import FrameSource
 from .config import Settings
+from .core_reporter import CoreReporter
 from .overlay import draw_overlay, mirror_pose_for_display
 from .pose import PoseEstimator, PoseFrame
 from .state_machine import (
@@ -27,6 +29,9 @@ from .state_machine import (
 )
 from .storage import JsonlWriter, utc_now
 from .video import AsyncVideoRecorder
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 class PoseProcessor(Protocol):
@@ -119,6 +124,7 @@ class SessionRuntime:
         self._processed_at: deque[float] = deque(maxlen=30)
         self._pose_confidence_sum = 0.0
         self._pose_confidence_count = 0
+        self._startup_timings: dict[str, float] = {}
 
         self._state_machine = StateMachine(
             request.exercise,
@@ -126,6 +132,7 @@ class SessionRuntime:
             min_confidence=settings.min_visibility,
         )
         self._alerts: Counter[str] = Counter()
+        self._core_reporter: CoreReporter | None = None
 
         self._event_lock = threading.Lock()
         self._events: deque[dict[str, Any]] = deque(maxlen=10000)
@@ -196,6 +203,15 @@ class SessionRuntime:
                 "throttle_waits": self._throttle_wait_count,
             }
 
+    @property
+    def startup_timings(self) -> dict[str, float]:
+        with self._status_lock:
+            return dict(self._startup_timings)
+
+    def _record_startup_timing(self, name: str, milliseconds: float) -> None:
+        with self._status_lock:
+            self._startup_timings[name] = round(milliseconds, 3)
+
     def start(self) -> None:
         if self._capture_thread is not None:
             return
@@ -206,6 +222,11 @@ class SessionRuntime:
             self._artifacts["landmarks_path"]
         )
         self._session_started_monotonic = time.monotonic()
+        if self.settings.core_url:
+            self._core_reporter = CoreReporter(
+                self.request.session_id,
+                self.settings,
+            )
         self._set_status("preparing")
         self._emit_state("preparing", "created")
         self._capture_thread = threading.Thread(
@@ -220,6 +241,10 @@ class SessionRuntime:
         )
         self._capture_thread.start()
         self._processing_thread.start()
+        self._record_startup_timing(
+            "threads_started_ms",
+            (time.monotonic() - self._session_started_monotonic) * 1000,
+        )
 
     def pause(self) -> None:
         with self._status_lock:
@@ -234,6 +259,12 @@ class SessionRuntime:
             self._latest_metrics["paused"] = True
             self._latest_metrics["phase"] = Phase.UNKNOWN.value
         self._emit_state("paused", "active")
+        if self._core_reporter is not None:
+            self._core_reporter.submit(
+                "paused",
+                dict(self._latest_metrics),
+                int(float(self._latest_metrics.get("elapsed_s", 0)) * 1000),
+            )
 
     def resume(self) -> None:
         with self._status_lock:
@@ -244,6 +275,12 @@ class SessionRuntime:
             self._state_machine.set_paused(False)
             self._latest_metrics["paused"] = False
         self._emit_state("active", "paused")
+        if self._core_reporter is not None:
+            self._core_reporter.submit(
+                "active",
+                dict(self._latest_metrics),
+                int(float(self._latest_metrics.get("elapsed_s", 0)) * 1000),
+            )
 
     def stop(self) -> dict[str, Any]:
         with self._status_lock:
@@ -307,7 +344,13 @@ class SessionRuntime:
         )
         video_frames_written = 0
         try:
+            camera_open_started = time.monotonic()
             source.open()
+            self._record_startup_timing(
+                "camera_open_ms",
+                (time.monotonic() - camera_open_started) * 1000,
+            )
+            first_frame = True
             while not self._stop_event.is_set():
                 frame = source.read()
                 if frame is None:
@@ -318,6 +361,16 @@ class SessionRuntime:
                     frame_index = self._capture_count
                     self._capture_count += 1
                 captured_at = time.monotonic()
+                if first_frame:
+                    first_frame = False
+                    self._record_startup_timing(
+                        "first_frame_ms",
+                        (
+                            captured_at
+                            - (self._session_started_monotonic or captured_at)
+                        )
+                        * 1000,
+                    )
                 if self._started_monotonic is None:
                     self._started_monotonic = captured_at
                     self._started_at = utc_now()
@@ -367,7 +420,13 @@ class SessionRuntime:
         inference_interval = 1.0 / self.settings.inference_fps
         preview_interval = 1.0 / self.settings.preview_fps
         try:
+            pose_init_started = time.monotonic()
             estimator = self._estimator_factory()
+            self._record_startup_timing(
+                "pose_init_ms",
+                (time.monotonic() - pose_init_started) * 1000,
+            )
+            first_inference = True
             while not self._stop_event.is_set() or not self._frame_queue.empty():
                 try:
                     item = self._frame_queue.get(timeout=0.25)
@@ -385,12 +444,19 @@ class SessionRuntime:
                     time.sleep(inference_interval - (now - last_inference_started))
                     now = time.monotonic()
                 last_inference_started = now
+                inference_started = time.monotonic()
                 pose = estimator.process(
                     item.frame,
                     item.frame_index,
                     item.t_ms,
                 )
                 now = time.monotonic()
+                if first_inference:
+                    first_inference = False
+                    self._record_startup_timing(
+                        "first_inference_ms",
+                        (now - inference_started) * 1000,
+                    )
                 self._processed_at.append(now)
                 self._record_landmark(item, pose)
                 self._consume_state_events(item, pose)
@@ -428,11 +494,31 @@ class SessionRuntime:
                     if self._status == "preparing":
                         self._status = "active"
                         self._active_started_monotonic = now
+                        self._startup_timings["active_ms"] = round(
+                            (
+                                now
+                                - (
+                                    self._session_started_monotonic
+                                    or now
+                                )
+                            )
+                            * 1000,
+                            3,
+                        )
                         became_active = True
                 if pose.detected:
                     self._pose_confidence_sum += pose.confidence
                     self._pose_confidence_count += 1
                 if became_active:
+                    logger.info(
+                        "session %s active startup_ms=%s",
+                        self.request.session_id,
+                        json.dumps(
+                            self.startup_timings,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    )
                     self._emit_state("active", "preparing")
                 if now - last_preview_at >= preview_interval:
                     last_preview_at = now
@@ -458,11 +544,19 @@ class SessionRuntime:
                         item.t_ms,
                         persist=False,
                     )
+                    if self._core_reporter is not None:
+                        self._core_reporter.submit(
+                            self.status,
+                            dict(self._latest_metrics),
+                            item.t_ms,
+                        )
         except Exception as exc:
             self._fail("pose_model_load_failed", str(exc))
         finally:
             if estimator is not None:
                 estimator.close()
+            if self._core_reporter is not None:
+                self._core_reporter.close()
             self._threads_done.set()
 
     def _record_landmark(
@@ -505,6 +599,16 @@ class SessionRuntime:
             captured.t_ms,
             pose.angle.angle_deg,
             pose.angle.confidence,
+            posture_valid=(
+                self.request.exercise != "pushup"
+                or pushup_posture_valid(
+                    pose.landmarks,
+                    self.request.view,
+                    captured.frame.shape[1],
+                    captured.frame.shape[0],
+                    self.settings.min_visibility,
+                )
+            ),
         )
         for event in events:
             if isinstance(event, RepCompleted):

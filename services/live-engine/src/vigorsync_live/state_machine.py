@@ -41,6 +41,7 @@ SIDE_THRESHOLDS = {
         down_exit=148.0,
         shallow_bottom=110.0,
         min_rep_s=0.30,
+        rep_cooldown_s=1.1,
     ),
 }
 
@@ -107,6 +108,7 @@ class StateMachine:
     _last_top_ms: int | None = field(default=None, init=False)
     _last_rep_end_ms: int | None = field(default=None, init=False)
     _bottom_angle: float | None = field(default=None, init=False)
+    _cycle_posture_valid: bool = field(default=True, init=False)
     _confidence_sum: float = field(default=0.0, init=False)
     _confidence_count: int = field(default=0, init=False)
 
@@ -149,6 +151,7 @@ class StateMachine:
         self._down_started_ms = None
         self._rep_started_ms = None
         self._bottom_angle = None
+        self._cycle_posture_valid = True
         self._confidence_sum = 0.0
         self._confidence_count = 0
 
@@ -157,6 +160,7 @@ class StateMachine:
         t_ms: int,
         angle: float | None,
         confidence: float,
+        posture_valid: bool = True,
     ) -> list[RepCompleted | FormAlert]:
         if self.paused or angle is None or confidence < self.min_confidence:
             return []
@@ -175,18 +179,19 @@ class StateMachine:
             if current >= thresholds.up_enter:
                 self._phase = Phase.UP
                 self._last_top_ms = t_ms
-            elif current <= thresholds.down_enter:
+            elif current <= thresholds.down_enter and posture_valid:
                 self._phase = Phase.DOWN
                 self._reached_down = True
                 self._down_started_ms = t_ms
                 self._rep_started_ms = t_ms
                 self._bottom_angle = current
+                self._cycle_posture_valid = posture_valid
                 self._confidence_sum = confidence
                 self._confidence_count = 1
             return []
 
         if self._phase is Phase.UP:
-            if current <= thresholds.down_enter:
+            if current <= thresholds.down_enter and posture_valid:
                 self._phase = Phase.DOWN
                 self._reached_down = True
                 self._down_started_ms = t_ms
@@ -196,12 +201,15 @@ class StateMachine:
                     else t_ms
                 )
                 self._bottom_angle = current
+                self._cycle_posture_valid = posture_valid
                 self._confidence_sum = confidence
                 self._confidence_count = 1
             return []
 
         if self._bottom_angle is None or current < self._bottom_angle:
             self._bottom_angle = current
+        if not posture_valid:
+            self._cycle_posture_valid = False
         self._confidence_sum += confidence
         self._confidence_count += 1
 
@@ -243,7 +251,7 @@ class StateMachine:
         )
 
         events: list[RepCompleted | FormAlert] = []
-        if cycle_ok:
+        if cycle_ok and self._cycle_posture_valid:
             rep_id = f"r_{secrets.token_hex(5)}"
             record = RepCompleted(
                 rep_id=rep_id,

@@ -107,10 +107,11 @@ components:
       schema:
         type: boolean
         default: false
-    ClientToken:
-      name: token
-      in: query
+    MirrorWebSocketProtocols:
+      name: Sec-WebSocket-Protocol
+      in: header
       required: true
+      description: Offer vigorsync.v1 and vigorsync.token.<mirror_token>.
       schema:
         type: string
         minLength: 8
@@ -232,6 +233,21 @@ components:
           type: [string, 'null']
           maxLength: 1000
           default: null
+      additionalProperties: false
+
+    ControlConfig:
+      type: object
+      required: [exercise, view, target_reps]
+      properties:
+        exercise:
+          $ref: ./common.schema.json#/$defs/Exercise
+        view:
+          $ref: ./common.schema.json#/$defs/View
+        target_reps:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 12
       additionalProperties: false
 
     SessionPage:
@@ -496,6 +512,37 @@ components:
           additionalProperties: false
       additionalProperties: false
 
+    MirrorConfigMessage:
+      type: object
+      required: [type, version, payload]
+      properties:
+        type:
+          const: session.config
+        version:
+          const: v1
+        payload:
+          $ref: '#/components/schemas/ControlConfig'
+      additionalProperties: false
+
+    MirrorDismissedMessage:
+      type: object
+      required: [type, version, session_id, payload]
+      properties:
+        type:
+          const: session.dismissed
+        version:
+          const: v1
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        payload:
+          type: object
+          required: [status]
+          properties:
+            status:
+              $ref: ./common.schema.json#/$defs/SessionStatus
+          additionalProperties: false
+      additionalProperties: false
+
     MirrorStateMessage:
       type: object
       required: [type, version, payload]
@@ -559,6 +606,31 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
+  /api/v1/control/config:
+    post:
+      tags: [sessions]
+      operationId: updateControlConfig
+      summary: Synchronize the mobile draft configuration to the mirror
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControlConfig'
+      responses:
+        '200':
+          description: Latest mirror draft configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/sessions:
     post:
       tags: [sessions]
@@ -607,6 +679,37 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/sessions/start:
+    post:
+      tags: [sessions]
+      operationId: createAndStartSession
+      summary: Atomically create a session and start Live Engine preparation
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '200':
+          description: Session created and moved to preparing.
+          content:
+            application/json:
+              schema:
+                $ref: ./session.schema.json
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/v1/sessions/{session_id}:
     get:
       tags: [sessions]
@@ -627,6 +730,36 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [sessions]
+      operationId: deleteSession
+      summary: Permanently delete a finished session and its local artifacts
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Session record, events and local directory were deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_id, deleted]
+                properties:
+                  session_id:
+                    $ref: ./common.schema.json#/$defs/SessionId
+                  deleted:
+                    const: true
+                additionalProperties: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /api/v1/sessions/{session_id}/start:
     post:
@@ -717,6 +850,36 @@ paths:
             application/json:
               schema:
                 $ref: ./session.schema.json
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/sessions/{session_id}/mirror/dismiss:
+    post:
+      tags: [sessions, websocket]
+      operationId: dismissMirrorSession
+      summary: Return the mirror UI to setup after the mobile user leaves summary
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Dismiss event was broadcast to the mirror.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_id, dismissed]
+                properties:
+                  session_id:
+                    $ref: ./common.schema.json#/$defs/SessionId
+                  dismissed:
+                    const: true
+                additionalProperties: false
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1029,11 +1192,10 @@ paths:
         Message types are session.snapshot, session.state, live.metrics,
         rep.completed, form.alert, report.ready and error. live.metrics is
         rate-limited to 2-5 Hz. Raw frames and landmarks are forbidden.
-      security: []
+      security:
+        - bearerAuth: []
       x-websocket: true
-      x-message-types: [session.snapshot, session.state, live.metrics, rep.completed, form.alert, report.ready, error]
-      parameters:
-        - $ref: '#/components/parameters/ClientToken'
+      x-message-types: [session.snapshot, session.state, session.deleted, live.metrics, rep.completed, form.alert, report.ready, error]
       responses:
         '101':
           description: WebSocket upgrade accepted.
@@ -1045,9 +1207,9 @@ paths:
       summary: Mirror control WebSocket
       security: []
       x-websocket: true
-      x-message-types: [session.start, session.state, mirror.state, error]
+      x-message-types: [session.start, session.config, session.dismissed, session.deleted, session.state, live.metrics, form.alert, mirror.state, error]
       parameters:
-        - $ref: '#/components/parameters/ClientToken'
+        - $ref: '#/components/parameters/MirrorWebSocketProtocols'
       responses:
         '101':
           description: WebSocket upgrade accepted.

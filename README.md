@@ -1,6 +1,7 @@
 # VigorSync
 
-面向家庭健身镜的产品工作区。M0 方案与契约已冻结，M1 本机实时闭环已落地。
+面向家庭健身镜的产品工作区。M0 方案与契约已冻结，M1 本机实时闭环和 M2
+手机控制闭环已落地。
 
 ## 工作区定位
 
@@ -99,6 +100,32 @@ M1 离线检查（不占用摄像头）：
 .\scripts\check_m1.ps1
 ```
 
+## M2 手机端运行
+
+一键启动 Core API、Live Engine 和镜端页面：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\mirror-control.ps1 -Action start -NoBrowser
+```
+
+Android 模拟器运行：
+
+```powershell
+cd apps\mobile
+D:\flutter\bin\flutter.bat run -d emulator-5554
+```
+
+Core 默认监听 `0.0.0.0:8011`。模拟器填写 `http://10.0.2.2:8011`，实体手机填写
+电脑局域网 IPv4 地址；开发配对码默认为 `482913`。App 的配对、构建、测试和
+目录说明见 [手机端说明](apps/mobile/README.md)。
+
+M2 回归检查：
+
+```powershell
+.\scripts\check_m2.ps1
+.\scripts\check_m2.ps1 -BuildApk
+```
+
 ## 计划目录
 
 代码实现开始后按以下结构落地：
@@ -132,10 +159,21 @@ VigorSync/
 
 ## 当前状态
 
-- 阶段：M0 已完成，M1 本机实时闭环已落地
+- 阶段：M0、M1 已完成，M2 手机控制闭环已在 Android AVD 验收
 - M1 包含摄像头采集、MediaPipe Pose、深蹲/俯卧撑计数、骨架 MJPEG、实时 WebSocket、本地录像与关键点/事件落盘、最小镜端页面
 - 提供约 8 MB 的轻量桌面启动器，使用 WebView2 原生窗口并通过 `X` 完成优雅退出
 - 镜端页面提供暂停感知计时、目标次数进度、主关节角和实时推理状态
+- 镜端可跟随手机启动、暂停、继续和结束训练，页面刷新后自动恢复当前会话
+- 手机首页的动作、机位和目标次数会实时同步到镜端，离开训练总结时镜端同步返回
+- 手机端支持持久化深色/浅色主题切换，并为深蹲、俯卧撑使用独立姿态图标
+- 手机历史支持永久删除已结束训练，并同步删除 Core 记录和本机训练产物
+- 手机端将 Core 的 UTC 时间转换为设备本地时间，并以中文状态、机位和时长展示
+- 启动链路已合并创建/启动请求并复用 Core 到 Live Engine 的 HTTP 连接；AVD
+  点击到 `active` 实测约 `3.6 s`
 - 实时推理默认限制为 20 FPS，只处理最新帧；可通过 `VIGORSYNC_INFERENCE_FPS` 调整
 - MJPEG 预览和骨架合成默认限制为 15 FPS；可通过 `VIGORSYNC_PREVIEW_FPS` 调整
-- 下一步：在最终镜端硬件上复测性能并确认横竖屏与音频方案，然后进入 M2 手机控制闭环
+- 下一步：实体 Android 手机回归，然后进入 M3 离线分析闭环
+
+M2 已完成 AVD 验收：Core API 已实现会话、配对、幂等命令、SQLite 持久化以及
+手机/镜端 WebSocket；镜端训练页已通过 Core 受控，Flutter 手机端已完成配对、
+训练控制、实时状态和历史页，停止后进入 `analyzing` 等待 M3。

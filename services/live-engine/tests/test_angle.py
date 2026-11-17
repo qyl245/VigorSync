@@ -8,7 +8,11 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
-from vigorsync_live.angle import Landmark, calculate_primary_angle
+from vigorsync_live.angle import (
+    Landmark,
+    calculate_primary_angle,
+    pushup_posture_valid,
+)
 
 
 def landmarks_with_knees(
@@ -59,6 +63,27 @@ class AngleTests(unittest.TestCase):
         )
         self.assertIsNone(observation.left_deg)
         self.assertIsNotNone(observation.right_deg)
+
+    def test_pushup_posture_rejects_vertical_torso(self) -> None:
+        landmarks = [
+            Landmark(index, 0.5, 0.5, 0.0, 0.99)
+            for index in range(33)
+        ]
+        landmarks[11] = Landmark(11, 0.4, 0.5, 0.0, 0.99)
+        landmarks[27] = Landmark(27, 0.6, 0.5, 0.0, 0.99)
+        landmarks[12] = Landmark(12, 0.4, 0.5, 0.0, 0.99)
+        landmarks[28] = Landmark(28, 0.6, 0.5, 0.0, 0.99)
+        self.assertTrue(
+            pushup_posture_valid(landmarks, "side_left", 640, 480)
+        )
+
+        landmarks[11] = Landmark(11, 0.5, 0.2, 0.0, 0.99)
+        landmarks[27] = Landmark(27, 0.5, 0.7, 0.0, 0.99)
+        landmarks[12] = Landmark(12, 0.5, 0.2, 0.0, 0.99)
+        landmarks[28] = Landmark(28, 0.5, 0.7, 0.0, 0.99)
+        self.assertFalse(
+            pushup_posture_valid(landmarks, "side_left", 640, 480)
+        )
 
 
 if __name__ == "__main__":
