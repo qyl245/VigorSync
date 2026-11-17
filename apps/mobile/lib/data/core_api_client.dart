@@ -206,6 +206,16 @@ class CoreApiClient {
     return SessionRecord.fromJson(payload);
   }
 
+  Future<Map<String, dynamic>> getReport(String sessionId) async {
+    return _request('GET', '/api/v1/sessions/$sessionId/report');
+  }
+
+  String resolveUrl(String value) {
+    final uri = Uri.parse(value);
+    if (uri.hasScheme) return value;
+    return Uri.parse('$baseUrl/').resolve(value.replaceFirst(RegExp(r'^/'), '')).toString();
+  }
+
   Future<void> dismissMirrorSession(String sessionId) async {
     await _request(
       'POST',

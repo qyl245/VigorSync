@@ -1,7 +1,7 @@
 # VigorSync
 
-面向家庭健身镜的产品工作区。M0 方案与契约已冻结，M1 本机实时闭环和 M2
-手机控制闭环已落地。
+面向家庭健身镜的产品工作区。M0 方案与契约已冻结，M1 本机实时闭环、
+M2 手机控制闭环和 M3 离线分析闭环已落地。
 
 ## 工作区定位
 
@@ -50,6 +50,7 @@ python3 -m venv .venv
 cd VigorSync
 .\.venv\Scripts\python.exe -m pip install -r services\live-engine\requirements.txt
 .\.venv\Scripts\python.exe -m pip install -r requirements-contracts.txt
+.\.venv\Scripts\python.exe -m pip install -r services\offline-worker\requirements.txt
 ```
 
 启动实时引擎：
@@ -126,6 +127,13 @@ M2 回归检查：
 .\scripts\check_m2.ps1 -BuildApk
 ```
 
+M3 回归检查：
+
+```powershell
+.\scripts\check_m3.ps1
+.\scripts\check_m3.ps1 -BuildApk
+```
+
 ## 计划目录
 
 代码实现开始后按以下结构落地：
@@ -159,7 +167,7 @@ VigorSync/
 
 ## 当前状态
 
-- 阶段：M0、M1 已完成，M2 手机控制闭环已在 Android AVD 验收
+- 阶段：M0、M1、M2 已完成，M3 离线分析闭环已在本机跑通
 - M1 包含摄像头采集、MediaPipe Pose、深蹲/俯卧撑计数、骨架 MJPEG、实时 WebSocket、本地录像与关键点/事件落盘、最小镜端页面
 - 提供约 8 MB 的轻量桌面启动器，使用 WebView2 原生窗口并通过 `X` 完成优雅退出
 - 镜端页面提供暂停感知计时、目标次数进度、主关节角和实时推理状态
@@ -168,12 +176,13 @@ VigorSync/
 - 手机端支持持久化深色/浅色主题切换，并为深蹲、俯卧撑使用独立姿态图标
 - 手机历史支持永久删除已结束训练，并同步删除 Core 记录和本机训练产物
 - 手机端将 Core 的 UTC 时间转换为设备本地时间，并以中文状态、机位和时长展示
+- 独立 Offline Worker 复用 VLS RepChain，生成离线摘要、问题卡和完整证据报告
+- 手机历史页可打开原生复盘摘要和完整 Web 报告；镜端可显示分析进度与最近复盘
 - 启动链路已合并创建/启动请求并复用 Core 到 Live Engine 的 HTTP 连接；AVD
   点击到 `active` 实测约 `3.6 s`
 - 实时推理默认限制为 20 FPS，只处理最新帧；可通过 `VIGORSYNC_INFERENCE_FPS` 调整
 - MJPEG 预览和骨架合成默认限制为 15 FPS；可通过 `VIGORSYNC_PREVIEW_FPS` 调整
-- 下一步：实体 Android 手机回归，然后进入 M3 离线分析闭环
+- 下一步：完善 M3 异常恢复和真机报告体验，再进行产品化补强
 
-M2 已完成 AVD 验收：Core API 已实现会话、配对、幂等命令、SQLite 持久化以及
-手机/镜端 WebSocket；镜端训练页已通过 Core 受控，Flutter 手机端已完成配对、
-训练控制、实时状态和历史页，停止后进入 `analyzing` 等待 M3。
+M3 已打通：手机和镜端继续通过 Core 控制训练；停止后 Core 自动提交 Offline
+Worker，RepChain 生成离线摘要、问题卡和证据报告，并把进度与结果推回手机和镜端。

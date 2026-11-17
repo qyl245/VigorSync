@@ -1,7 +1,7 @@
 # VigorSync Desktop Shell
 
-轻量 WebView2 桌面外壳。它在同一进程内启动现有 Live Engine 和镜端静态服务，
-不使用外部浏览器。
+轻量 WebView2 桌面外壳。它在同一进程内启动 Core、Live Engine、Offline Worker
+和镜端静态服务，不使用外部浏览器。
 
 开发启动：
 
@@ -17,7 +17,7 @@ cd E:\project\Exercise\VigorSync
 1. 检查是否存在活动训练。
 2. 训练中弹出确认框。
 3. 用户确认后停止训练并完成录像、关键点和 summary 落盘。
-4. 关闭本程序内部启动的 Live Engine 与镜端服务。
+4. 关闭本程序内部启动的 Core、Live Engine、Offline Worker 与镜端服务。
 
 单实例互斥会阻止重复打开导致摄像头争夺。运行日志写入
 `webdata/runtime/desktop.log`。
@@ -36,7 +36,8 @@ dist\VigorSyncLauncher\VigorSyncLauncher.exe
 ```
 
 该 EXE 是轻量启动器，调用当前工作区的 `.venv\Scripts\pythonw.exe` 和桌面宿主，
-不包含 MediaPipe/OpenCV。它适合当前 M1 开发机，生成快、体积小且没有控制台窗口。
+不包含 MediaPipe/OpenCV。它适合当前开发机，生成快、体积小且没有控制台窗口；
+Offline Worker 运行时使用工作区的 `.venv` 和 `vendor/vls`。
 
 `build_desktop.ps1` 保留为实验性的完整 self-contained 打包入口；MediaPipe 依赖会使
 目录达到数百 MB，当前不作为默认交付方式。

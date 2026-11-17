@@ -305,6 +305,26 @@ input:focus {
   font-size: 0.82rem;
 }
 
+.latest-report {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  border: 1px solid rgba(217, 255, 67, 0.28);
+  border-radius: 3px;
+  padding: 12px 14px;
+  background: rgba(217, 255, 67, 0.07);
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.latest-report a {
+  color: var(--acid);
+  font-weight: 750;
+  text-decoration: none;
+}
+
 .privacy-note {
   margin: 24px 0 0;
   color: #656c64;
@@ -701,6 +721,66 @@ input:focus {
   font-size: 0.7rem;
   line-height: 1.5;
   word-break: break-all;
+}
+
+.analysis-status {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 12px;
+  margin-top: 18px;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.analysis-status strong {
+  color: var(--ink);
+}
+
+.analysis-progress {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.analysis-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--acid);
+  transition: width 220ms ease;
+}
+
+.analysis-finding {
+  margin-top: 14px;
+  border-left: 3px solid var(--cyan);
+  padding: 11px 13px;
+  background: rgba(134, 232, 255, 0.06);
+}
+
+.analysis-finding span,
+.analysis-finding strong {
+  display: block;
+}
+
+.analysis-finding span {
+  color: var(--cyan);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+}
+
+.analysis-finding strong {
+  margin-top: 5px;
+  font-size: 0.92rem;
+}
+
+.summary-actions {
+  display: grid;
+  gap: 9px;
+}
+
+.report-button {
+  text-decoration: none;
 }
 
 @media (max-width: 900px) {

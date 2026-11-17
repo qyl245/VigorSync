@@ -278,8 +278,10 @@ components:
 
     ReportSummary:
       type: object
-      required: [rep_count, rejected_rep_count, quality_status, active_issue_count]
+      required: [status, rep_count, rejected_rep_count, duration_s, quality_status, active_issue_count, severity_counts, mean_confidence, issues]
       properties:
+        status:
+          type: string
         rep_count:
           type: integer
           minimum: 0
@@ -288,10 +290,27 @@ components:
           minimum: 0
         quality_status:
           type: string
-          enum: [good, limited, poor, unknown]
+          enum: [pass, limited, reject, unknown]
         active_issue_count:
           type: integer
           minimum: 0
+        duration_s:
+          type: number
+          minimum: 0
+        severity_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        mean_confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        issues:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
       additionalProperties: false
 
     SessionReport:
@@ -305,7 +324,7 @@ components:
           pattern: '^job_[A-Za-z0-9_-]{6,64}$'
         status:
           type: string
-          enum: [pending, ready, failed]
+          enum: [completed, failed]
         report_url:
           type: [string, 'null']
           format: uri-reference
@@ -453,7 +472,7 @@ components:
 
     ReportReadyMessage:
       type: object
-      required: [type, version, session_id, job_id, report_url]
+      required: [type, version, session_id, job_id, report_url, summary]
       properties:
         type:
           const: report.ready
@@ -466,6 +485,33 @@ components:
         report_url:
           type: string
           format: uri-reference
+        summary:
+          $ref: '#/components/schemas/ReportSummary'
+      additionalProperties: false
+
+    ReportProgressMessage:
+      type: object
+      required: [type, version, session_id, payload]
+      properties:
+        type:
+          const: report.progress
+        version:
+          const: v1
+        session_id:
+          $ref: ./common.schema.json#/$defs/SessionId
+        payload:
+          type: object
+          required: [job_id, stage, progress]
+          properties:
+            job_id:
+              $ref: ./common.schema.json#/$defs/JobId
+            stage:
+              type: string
+            progress:
+              type: number
+              minimum: 0
+              maximum: 1
+          additionalProperties: false
       additionalProperties: false
 
     ErrorMessage:
@@ -986,6 +1032,31 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
+  /api/v1/reports/{report_ticket}/{asset_path}:
+    get:
+      tags: [reports]
+      operationId: getReportAsset
+      summary: Read a report or evidence asset using an opaque ticket
+      security: []
+      parameters:
+        - name: report_ticket
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 128
+        - name: asset_path
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: HTML report, video, or evidence frame.
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/internal/sessions/{session_id}/state:
     post:
       tags: [internal]
@@ -1195,7 +1266,7 @@ paths:
       security:
         - bearerAuth: []
       x-websocket: true
-      x-message-types: [session.snapshot, session.state, session.deleted, live.metrics, rep.completed, form.alert, report.ready, error]
+      x-message-types: [session.snapshot, session.state, session.deleted, live.metrics, rep.completed, form.alert, report.progress, report.ready, error]
       responses:
         '101':
           description: WebSocket upgrade accepted.
@@ -1207,7 +1278,7 @@ paths:
       summary: Mirror control WebSocket
       security: []
       x-websocket: true
-      x-message-types: [session.start, session.config, session.dismissed, session.deleted, session.state, live.metrics, form.alert, mirror.state, error]
+      x-message-types: [session.start, session.config, session.dismissed, session.deleted, session.state, live.metrics, form.alert, report.progress, report.ready, mirror.state, error]
       parameters:
         - $ref: '#/components/parameters/MirrorWebSocketProtocols'
       responses:

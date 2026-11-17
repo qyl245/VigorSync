@@ -85,6 +85,46 @@
       "format": "uri-reference",
       "default": null
     },
+    "analysis": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "job_id",
+            "stage",
+            "progress",
+            "summary"
+          ],
+          "properties": {
+            "job_id": {
+              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/JobId"
+            },
+            "stage": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "progress": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "summary": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "live_summary": {
       "oneOf": [
         {

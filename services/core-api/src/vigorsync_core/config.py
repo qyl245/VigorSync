@@ -19,6 +19,9 @@ class Settings:
     port: int = 8011
     live_url: str = "http://127.0.0.1:8020"
     live_internal_token: str | None = None
+    offline_url: str = "http://127.0.0.1:8030"
+    offline_internal_token: str = "vigorsync-offline-dev"
+    offline_data_root: Path | None = None
     mirror_token: str = "vigorsync-mirror-dev"
     pairing_code: str = "482913"
 
@@ -50,6 +53,20 @@ class Settings:
             live_internal_token=(
                 os.getenv("VIGORSYNC_LIVE_INTERNAL_TOKEN") or None
             ),
+            offline_url=os.getenv(
+                "VIGORSYNC_OFFLINE_URL",
+                "http://127.0.0.1:8030",
+            ).rstrip("/"),
+            offline_internal_token=os.getenv(
+                "VIGORYSYNC_OFFLINE_INTERNAL_TOKEN",
+                "vigorsync-offline-dev",
+            ),
+            offline_data_root=Path(
+                os.getenv(
+                    "VIGORYSYNC_OFFLINE_DATA_ROOT",
+                    str(webdata / "offline"),
+                )
+            ).resolve(),
             mirror_token=os.getenv(
                 "VIGORSYNC_MIRROR_TOKEN",
                 "vigorsync-mirror-dev",
@@ -60,3 +77,5 @@ class Settings:
     def ensure_directories(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.session_root.mkdir(parents=True, exist_ok=True)
+        if self.offline_data_root is not None:
+            self.offline_data_root.mkdir(parents=True, exist_ok=True)

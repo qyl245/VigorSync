@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
 
 import '../../data/core_api_client.dart';
@@ -26,6 +30,9 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   late final CoreApiClient _api;
+  WebSocket? _socket;
+  StreamSubscription<dynamic>? _socketSubscription;
+  Timer? _reconnectTimer;
   int _index = 0;
   int _refreshToken = 0;
 
@@ -33,12 +40,51 @@ class _AppShellState extends State<AppShell> {
   void initState() {
     super.initState();
     _api = CoreApiClient(widget.credentials);
+    _connectEvents();
   }
 
   @override
   void dispose() {
+    _reconnectTimer?.cancel();
+    _socketSubscription?.cancel();
+    _socket?.close();
     _api.close();
     super.dispose();
+  }
+
+  Future<void> _connectEvents() async {
+    try {
+      final socket = await _api.connectClientSocket();
+      if (!mounted) {
+        await socket.close();
+        return;
+      }
+      _socket = socket;
+      _socketSubscription = socket.listen(
+        (message) {
+          final decoded = jsonDecode(message as String);
+          if (decoded is! Map<String, dynamic>) return;
+          final type = decoded['type'];
+          if (type == 'session.snapshot' ||
+              type == 'session.state' ||
+              type == 'session.deleted' ||
+              type == 'report.progress' ||
+              type == 'report.ready') {
+            _refresh();
+          }
+        },
+        onDone: _reconnectEvents,
+        onError: (_) => _reconnectEvents(),
+      );
+    } catch (_) {
+      _reconnectEvents();
+    }
+  }
+
+  void _reconnectEvents() {
+    if (!mounted) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(const Duration(seconds: 2), _connectEvents);
   }
 
   void _refresh() => setState(() => _refreshToken++);

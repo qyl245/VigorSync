@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve the M1 mirror UI on the documented port 8080."""
+"""Serve the VigorSync mirror UI on the documented port 8080."""
 
 from __future__ import annotations
 

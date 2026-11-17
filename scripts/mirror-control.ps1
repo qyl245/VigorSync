@@ -13,6 +13,8 @@ $liveLog = Join-Path $runtimeDir "live-engine.log"
 $liveErr = Join-Path $runtimeDir "live-engine.err.log"
 $coreLog = Join-Path $runtimeDir "core-api.log"
 $coreErr = Join-Path $runtimeDir "core-api.err.log"
+$offlineLog = Join-Path $runtimeDir "offline-worker.log"
+$offlineErr = Join-Path $runtimeDir "offline-worker.err.log"
 $mirrorLog = Join-Path $runtimeDir "mirror.log"
 $mirrorErr = Join-Path $runtimeDir "mirror.err.log"
 $browserProfile = Join-Path $runtimeDir "browser-profile"
@@ -20,6 +22,8 @@ $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $mirrorUrl = "http://127.0.0.1:8080"
 $liveHealth = "http://127.0.0.1:8020/api/v1/health"
 $coreHealth = "http://127.0.0.1:8011/api/v1/health"
+$offlineHealth = "http://127.0.0.1:8030/api/v1/health"
+$offlineToken = "vigorsync-offline-dev"
 
 function Test-HttpOk {
     param([string]$Url)
@@ -134,6 +138,7 @@ function Stop-ManagedMirror {
 
     Stop-ExactProcess -ProcessId ([int]$state.mirrorPid) -ExpectedText "apps\mirror\server.py"
     Stop-ExactProcess -ProcessId ([int]$state.livePid) -ExpectedText "vigorsync_live"
+    Stop-ExactProcess -ProcessId ([int]$state.offlinePid) -ExpectedText "vigorsync_offline"
     Stop-ExactProcess -ProcessId ([int]$state.corePid) -ExpectedText "vigorsync_core"
 
     Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
@@ -148,6 +153,7 @@ function Show-Status {
         mirror_port_owner = Get-PortOwner -Port 8080
         core_port_owner = Get-PortOwner -Port 8011
         live_ready = Test-HttpOk -Url $liveHealth
+        offline_ready = Test-HttpOk -Url $offlineHealth
         mirror_ready = Test-HttpOk -Url $mirrorUrl
         core_ready = Test-HttpOk -Url $coreHealth
         url = $mirrorUrl
@@ -178,6 +184,7 @@ if ($null -eq $state) {
         livePid = $null
         mirrorPid = $null
         corePid = $null
+        offlinePid = $null
         browserProfile = $browserProfile
     }
 }
@@ -186,14 +193,56 @@ $state.startedAt = (Get-Date).ToString("o")
 $startedLive = $null
 $startedMirror = $null
 $startedCore = $null
+$startedOffline = $null
 
 try {
+    if (-not (Test-HttpOk -Url $offlineHealth)) {
+        if (Get-PortOwner -Port 8030) {
+            throw "Port 8030 is occupied but the Offline Worker health check failed."
+        }
+        $oldPythonPath = $env:PYTHONPATH
+        $oldSessionRoot = $env:VIGORYSYNC_SESSION_ROOT
+        $oldOfflineRoot = $env:VLS_WEBDATA_ROOT
+        $oldOfflineToken = $env:VIGORYSYNC_OFFLINE_INTERNAL_TOKEN
+        $env:PYTHONPATH = Join-Path $projectRoot "services\offline-worker\src"
+        $env:VIGORYSYNC_SESSION_ROOT = Join-Path $projectRoot "webdata\sessions"
+        $env:VLS_WEBDATA_ROOT = Join-Path $projectRoot "webdata\offline"
+        $env:VIGORYSYNC_OFFLINE_INTERNAL_TOKEN = $offlineToken
+        try {
+            $startedOffline = Start-Process `
+                -FilePath $python `
+                -ArgumentList @("-m", "vigorsync_offline") `
+                -WorkingDirectory $projectRoot `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput $offlineLog `
+                -RedirectStandardError $offlineErr `
+                -PassThru
+        }
+        finally {
+            $env:PYTHONPATH = $oldPythonPath
+            $env:VIGORYSYNC_SESSION_ROOT = $oldSessionRoot
+            $env:VLS_WEBDATA_ROOT = $oldOfflineRoot
+            $env:VIGORYSYNC_OFFLINE_INTERNAL_TOKEN = $oldOfflineToken
+        }
+        $state.offlinePid = $startedOffline.Id
+        if (-not (Wait-Until -Condition { Test-HttpOk -Url $offlineHealth })) {
+            throw "Offline Worker did not become ready. Check $offlineErr"
+        }
+        $state.offlinePid = Get-PortOwner -Port 8030
+    }
+
     if (-not (Test-HttpOk -Url $coreHealth)) {
         if (Get-PortOwner -Port 8011) {
             throw "Port 8011 is occupied but the VigorSync Core API health check failed."
         }
         $oldPythonPath = $env:PYTHONPATH
+        $oldOfflineUrl = $env:VIGORYSYNC_OFFLINE_URL
+        $oldOfflineToken = $env:VIGORYSYNC_OFFLINE_INTERNAL_TOKEN
+        $oldOfflineRoot = $env:VIGORYSYNC_OFFLINE_DATA_ROOT
         $env:PYTHONPATH = Join-Path $projectRoot "services\core-api\src"
+        $env:VIGORYSYNC_OFFLINE_URL = "http://127.0.0.1:8030"
+        $env:VIGORYSYNC_OFFLINE_INTERNAL_TOKEN = $offlineToken
+        $env:VIGORYSYNC_OFFLINE_DATA_ROOT = Join-Path $projectRoot "webdata\offline"
         try {
             $startedCore = Start-Process `
                 -FilePath $python `
@@ -206,6 +255,9 @@ try {
         }
         finally {
             $env:PYTHONPATH = $oldPythonPath
+            $env:VIGORYSYNC_OFFLINE_URL = $oldOfflineUrl
+            $env:VIGORYSYNC_OFFLINE_INTERNAL_TOKEN = $oldOfflineToken
+            $env:VIGORYSYNC_OFFLINE_DATA_ROOT = $oldOfflineRoot
         }
         $state.corePid = $startedCore.Id
         if (-not (Wait-Until -Condition { Test-HttpOk -Url $coreHealth })) {
@@ -298,6 +350,10 @@ catch {
     if ($startedLive) {
         $liveOwner = Get-PortOwner -Port 8020
         Stop-ExactProcess -ProcessId $liveOwner -ExpectedText "vigorsync_live"
+    }
+    if ($startedOffline) {
+        $offlineOwner = Get-PortOwner -Port 8030
+        Stop-ExactProcess -ProcessId $offlineOwner -ExpectedText "vigorsync_offline"
     }
     if ($startedCore) {
         $coreOwner = Get-PortOwner -Port 8011

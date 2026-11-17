@@ -73,6 +73,22 @@ class Database:
                 );
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(sessions)"
+                ).fetchall()
+            }
+            for name, definition in {
+                "analysis_stage": "TEXT",
+                "analysis_progress": "REAL NOT NULL DEFAULT 0",
+                "analysis_summary": "TEXT",
+                "report_ticket": "TEXT",
+            }.items():
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE sessions ADD COLUMN {name} {definition}"
+                    )
 
     @contextmanager
     def _connect(self):
@@ -151,6 +167,10 @@ class Database:
             "live_summary",
             "error",
             "artifacts",
+            "analysis_stage",
+            "analysis_progress",
+            "analysis_summary",
+            "report_ticket",
         }
         if not set(changes) <= allowed:
             raise ValueError("unsupported session fields")
@@ -158,7 +178,13 @@ class Database:
         for key, value in changes.items():
             converted[key] = (
                 json.dumps(value, ensure_ascii=False)
-                if key in {"live_summary", "error", "artifacts"}
+                if key
+                in {
+                    "live_summary",
+                    "error",
+                    "artifacts",
+                    "analysis_summary",
+                }
                 else value
             )
         converted["updated_at"] = utc_now()
@@ -319,6 +345,17 @@ class Database:
                 (f"%/sessions/{session_id}/%",),
             )
 
+    def get_session_by_report_ticket(
+        self,
+        report_ticket: str,
+    ) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM sessions WHERE report_ticket = ?",
+                (report_ticket,),
+            ).fetchone()
+        return self._session_row(row) if row is not None else None
+
     @staticmethod
     def _session_row(row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -342,5 +379,13 @@ class Database:
             "artifacts": (
                 json.loads(row["artifacts"]) if row["artifacts"] else None
             ),
+            "analysis_stage": row["analysis_stage"],
+            "analysis_progress": row["analysis_progress"],
+            "analysis_summary": (
+                json.loads(row["analysis_summary"])
+                if row["analysis_summary"]
+                else None
+            ),
+            "report_ticket": row["report_ticket"],
             "updated_at": row["updated_at"],
         }

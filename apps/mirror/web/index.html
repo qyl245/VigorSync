@@ -16,7 +16,7 @@
             <span class="brand-mark" aria-hidden="true">V/S</span>
             <span class="brand-word">VIGORSYNC</span>
           </div>
-          <p class="eyebrow">LOCAL MOTION LAB · M1</p>
+          <p class="eyebrow">LOCAL MOTION LAB · M3</p>
           <h1>让每一次<br /><em>发力可见。</em></h1>
           <p class="lead">
             不追逐数字。看清姿态、节奏和关节轨迹，让下一组比上一组更准确。
@@ -68,6 +68,12 @@
             <span class="button-arrow" aria-hidden="true">↗</span>
           </button>
           <p id="setup-error" class="setup-error" role="alert"></p>
+          <div id="latest-report" class="latest-report" hidden>
+            <span>上一组离线复盘已生成</span>
+            <a id="latest-report-link" href="#" target="_blank" rel="noopener">
+              查看报告 ↗
+            </a>
+          </div>
           <p class="privacy-note">
             已配对手机可远程同步配置与控制；所有画面、姿态与指标仅在本机处理。
           </p>
@@ -161,11 +167,34 @@
             <div><span>平均置信度</span><strong id="summary-confidence">--</strong></div>
             <div><span>推理帧率</span><strong id="summary-fps">--</strong></div>
           </div>
+          <div id="analysis-status" class="analysis-status">
+            <span>离线分析</span>
+            <strong id="analysis-status-text">排队中</strong>
+            <div class="analysis-progress">
+              <span id="analysis-progress-bar"></span>
+            </div>
+          </div>
+          <div id="analysis-finding" class="analysis-finding" hidden>
+            <span id="analysis-quality">--</span>
+            <strong id="analysis-issue">未发现可靠问题</strong>
+          </div>
           <p id="summary-path" class="summary-path"></p>
-          <button id="restart-button" class="primary-button" type="button">
-            <span>再来一组</span>
-            <span class="button-arrow" aria-hidden="true">↗</span>
-          </button>
+          <div class="summary-actions">
+            <a
+              id="open-report-button"
+              class="primary-button report-button"
+              href="#"
+              target="_blank"
+              rel="noopener"
+              hidden
+            >
+              <span>查看完整复盘</span>
+              <span class="button-arrow" aria-hidden="true">↗</span>
+            </a>
+            <button id="restart-button" class="secondary-button" type="button">
+              再来一组
+            </button>
+          </div>
         </div>
       </section>
     </main>

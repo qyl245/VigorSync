@@ -32,12 +32,15 @@ DATA_ROOT = (
 WEB_ROOT = SOURCE_ROOT / "apps" / "mirror" / "web"
 RUNTIME_ROOT = DATA_ROOT / "webdata" / "runtime"
 SESSION_ROOT = DATA_ROOT / "webdata" / "sessions"
+OFFLINE_DATA_ROOT = DATA_ROOT / "webdata" / "offline"
 LIVE_SOURCE = SOURCE_ROOT / "services" / "live-engine" / "src"
 CORE_SOURCE = SOURCE_ROOT / "services" / "core-api" / "src"
+OFFLINE_SOURCE = SOURCE_ROOT / "services" / "offline-worker" / "src"
 APP_TITLE = "VigorSync · 动作遥测"
 LIVE_URL = "http://127.0.0.1:8020"
 MIRROR_URL = "http://127.0.0.1:8080"
 CORE_URL = "http://127.0.0.1:8011"
+OFFLINE_URL = "http://127.0.0.1:8030"
 CORE_HOST = os.getenv("VIGORSYNC_CORE_HOST", "0.0.0.0")
 
 os.environ.setdefault("VIGORSYNC_PROJECT_ROOT", str(DATA_ROOT))
@@ -45,10 +48,19 @@ os.environ.setdefault("VIGORSYNC_SESSION_ROOT", str(SESSION_ROOT))
 os.environ.setdefault("VIGORSYNC_LIVE_HOST", "127.0.0.1")
 os.environ.setdefault("VIGORSYNC_LIVE_PORT", "8020")
 os.environ.setdefault("VIGORSYNC_CORE_URL", CORE_URL)
+os.environ.setdefault("VIGORYSYNC_OFFLINE_URL", OFFLINE_URL)
+os.environ.setdefault(
+    "VIGORYSYNC_OFFLINE_INTERNAL_TOKEN",
+    "vigorsync-offline-dev",
+)
+os.environ.setdefault("VIGORYSYNC_OFFLINE_DATA_ROOT", str(OFFLINE_DATA_ROOT))
+os.environ.setdefault("VLS_WEBDATA_ROOT", str(OFFLINE_DATA_ROOT))
 if str(LIVE_SOURCE) not in sys.path:
     sys.path.insert(0, str(LIVE_SOURCE))
 if str(CORE_SOURCE) not in sys.path:
     sys.path.insert(0, str(CORE_SOURCE))
+if str(OFFLINE_SOURCE) not in sys.path:
+    sys.path.insert(0, str(OFFLINE_SOURCE))
 
 
 class QuietMirrorHandler(SimpleHTTPRequestHandler):
@@ -99,19 +111,54 @@ class DesktopHost:
         self.live_thread: threading.Thread | None = None
         self.core_server: Any = None
         self.core_thread: threading.Thread | None = None
+        self.offline_server: Any = None
+        self.offline_thread: threading.Thread | None = None
         self.mirror_server: ThreadingHTTPServer | None = None
         self.mirror_thread: threading.Thread | None = None
         self.manages_live = False
         self.manages_core = False
+        self.manages_offline = False
         self.manages_mirror = False
         self.allow_close = False
 
     def start(self) -> None:
         RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
         SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+        OFFLINE_DATA_ROOT.mkdir(parents=True, exist_ok=True)
+        self._start_offline()
         self._start_core()
         self._start_live()
         self._start_mirror()
+
+    def _start_offline(self) -> None:
+        health_url = f"{OFFLINE_URL}/api/v1/health"
+        if http_ok(health_url):
+            logging.info("Attached to an existing Offline Worker")
+            return
+        try:
+            import uvicorn
+
+            from vigorsync_offline.app import app as offline_app
+        except Exception as exc:
+            raise RuntimeError(f"cannot load Offline Worker: {exc}") from exc
+        config = uvicorn.Config(
+            offline_app,
+            host="127.0.0.1",
+            port=8030,
+            log_level="warning",
+            access_log=False,
+        )
+        self.offline_server = uvicorn.Server(config)
+        self.offline_thread = threading.Thread(
+            target=self.offline_server.run,
+            name="vigorsync-desktop-offline",
+            daemon=True,
+        )
+        self.offline_thread.start()
+        self.manages_offline = True
+        if not wait_until(lambda: http_ok(health_url)):
+            raise RuntimeError("Offline Worker failed to start; see desktop.log")
+        logging.info("Offline Worker started")
 
     def _start_core(self) -> None:
         health_url = f"{CORE_URL}/api/v1/health"
@@ -254,6 +301,10 @@ class DesktopHost:
             self.core_server.should_exit = True
         if self.core_thread is not None:
             self.core_thread.join(timeout=8.0)
+        if self.manages_offline and self.offline_server is not None:
+            self.offline_server.should_exit = True
+        if self.offline_thread is not None:
+            self.offline_thread.join(timeout=8.0)
         logging.info("Desktop host stopped")
 
 

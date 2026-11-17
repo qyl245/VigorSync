@@ -15,8 +15,13 @@ class SessionRecord {
     this.createdAt,
     this.startedAt,
     this.endedAt,
+    this.jobId,
     this.reportUrl,
     this.liveSummary,
+    this.analysisStage,
+    this.analysisProgress = 0,
+    this.analysisSummary,
+    this.error,
   });
 
   final String sessionId;
@@ -27,8 +32,13 @@ class SessionRecord {
   final String? createdAt;
   final String? startedAt;
   final String? endedAt;
+  final String? jobId;
   final String? reportUrl;
   final Map<String, dynamic>? liveSummary;
+  final String? analysisStage;
+  final double analysisProgress;
+  final Map<String, dynamic>? analysisSummary;
+  final Map<String, dynamic>? error;
 
   bool get isActive =>
       const {'created', 'preparing', 'active', 'paused'}.contains(status);
@@ -43,12 +53,32 @@ class SessionRecord {
       createdAt: json['created_at'] as String?,
       startedAt: json['started_at'] as String?,
       endedAt: json['ended_at'] as String?,
+      jobId:
+          json['job_id'] as String? ??
+          (json['analysis'] as Map<String, dynamic>?)?['job_id'] as String?,
       reportUrl: json['report_url'] as String?,
       liveSummary: json['live_summary'] as Map<String, dynamic>?,
+      analysisStage:
+          (json['analysis'] as Map<String, dynamic>?)?['stage'] as String?,
+      analysisProgress:
+          ((json['analysis'] as Map<String, dynamic>?)?['progress'] as num?)
+              ?.toDouble() ??
+          0,
+      analysisSummary:
+          (json['analysis'] as Map<String, dynamic>?)?['summary']
+              as Map<String, dynamic>?,
+      error: json['error'] as Map<String, dynamic>?,
     );
   }
 
-  SessionRecord copyWith({String? status}) {
+  SessionRecord copyWith({
+    String? status,
+    String? reportUrl,
+    String? analysisStage,
+    double? analysisProgress,
+    Map<String, dynamic>? analysisSummary,
+    Map<String, dynamic>? error,
+  }) {
     return SessionRecord(
       sessionId: sessionId,
       status: status ?? this.status,
@@ -58,8 +88,13 @@ class SessionRecord {
       createdAt: createdAt,
       startedAt: startedAt,
       endedAt: endedAt,
-      reportUrl: reportUrl,
+      jobId: jobId,
+      reportUrl: reportUrl ?? this.reportUrl,
       liveSummary: liveSummary,
+      analysisStage: analysisStage ?? this.analysisStage,
+      analysisProgress: analysisProgress ?? this.analysisProgress,
+      analysisSummary: analysisSummary ?? this.analysisSummary,
+      error: error ?? this.error,
     );
   }
 }

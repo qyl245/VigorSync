@@ -1,4 +1,4 @@
-# VigorSync Core API M2
+# VigorSync Core API M3
 
 Core API 管理手机配对、会话状态、Live Engine 命令、幂等请求和实时 WebSocket
 广播，默认监听 `0.0.0.0:8011`，供同一局域网内的手机配对访问。
@@ -29,7 +29,8 @@ $env:VIGORSYNC_CORE_URL = "http://127.0.0.1:8011"
 - 手机和镜端 WebSocket 快照/事件通道。
 - 本机开发接口 `/dev/v1/*`，供 M2 镜端阶段联调。
 
-停止训练后会话进入 `analyzing`，等待 M3 离线任务接入。
+停止训练后 Core 会创建离线 job，轮询本机 Offline Worker，并把分析阶段、进度、
+摘要和报告地址同步给手机与镜端。
 
 手机 WebSocket 使用 `Authorization: Bearer <pairing_token>` 握手，不把 token
 放入 URL。镜端 WebSocket 使用 `vigorsync.v1` 和

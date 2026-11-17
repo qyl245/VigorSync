@@ -5,6 +5,7 @@ import '../../models/session.dart';
 import '../../theme/vigorsync_theme.dart';
 import '../../utils/session_format.dart';
 import '../../widgets/exercise_glyph.dart';
+import '../report/report_page.dart';
 
 class HistoryPage extends StatefulWidget {
   const HistoryPage({
@@ -44,6 +45,15 @@ class _HistoryPageState extends State<HistoryPage> {
 
   void _load() {
     _future = widget.api.listSessions();
+  }
+
+  Future<void> _openReport(SessionRecord session) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SessionReportPage(api: widget.api, session: session),
+      ),
+    );
+    if (mounted) setState(_load);
   }
 
   Future<void> _deleteSession(SessionRecord session) async {
@@ -178,6 +188,7 @@ class _HistoryPageState extends State<HistoryPage> {
                           session: session,
                           deleting: _deletingSessionId == session.sessionId,
                           onDelete: () => _deleteSession(session),
+                          onOpenReport: () => _openReport(session),
                         ),
                       )
                       .toList(),
@@ -196,11 +207,13 @@ class _HistoryCard extends StatelessWidget {
     required this.session,
     required this.deleting,
     required this.onDelete,
+    required this.onOpenReport,
   });
 
   final SessionRecord session;
   final bool deleting;
   final VoidCallback onDelete;
+  final VoidCallback onOpenReport;
 
   @override
   Widget build(BuildContext context) {
@@ -257,7 +270,10 @@ class _HistoryCard extends StatelessWidget {
               else
                 IconButton(
                   onPressed:
-                      session.isActive || session.status == 'stopping'
+                      session.isActive ||
+                          session.status == 'stopping' ||
+                          (session.status == 'analyzing' &&
+                              session.jobId != null)
                       ? null
                       : onDelete,
                   tooltip: '删除训练记录',
@@ -266,6 +282,8 @@ class _HistoryCard extends StatelessWidget {
                     Icons.delete_outline,
                     size: 20,
                     color: session.isActive || session.status == 'stopping'
+                        || (session.status == 'analyzing' &&
+                            session.jobId != null)
                         ? palette.muted
                         : palette.signal,
                   ),
@@ -297,6 +315,45 @@ class _HistoryCard extends StatelessWidget {
             ].join('  ·  '),
             style: TextStyle(color: palette.muted, fontSize: 10),
           ),
+          if (session.status == 'analyzing' && session.jobId != null) ...[
+            const SizedBox(height: 12),
+            LinearProgressIndicator(
+              value: session.analysisProgress > 0
+                  ? session.analysisProgress
+                  : null,
+              minHeight: 3,
+              color: palette.accent,
+              backgroundColor: palette.line,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '离线分析 ${((session.analysisProgress) * 100).round()}%'
+              ' · ${session.analysisStage ?? 'queued'}',
+              style: TextStyle(color: palette.muted, fontSize: 10),
+            ),
+          ] else if (session.status == 'analyzing') ...[
+            const SizedBox(height: 10),
+            Text(
+              '历史会话未关联离线任务，可删除后重新测试',
+              style: TextStyle(color: palette.muted, fontSize: 10),
+            ),
+          ],
+          if (session.reportUrl != null) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: onOpenReport,
+              icon: const Icon(Icons.analytics_outlined, size: 18),
+              label: const Text('查看离线复盘'),
+            ),
+          ],
+          if (session.status == 'failed' &&
+              (session.error?['message'] as String?)?.isNotEmpty == true) ...[
+            const SizedBox(height: 12),
+            Text(
+              session.error!['message'] as String,
+              style: TextStyle(color: palette.signal, fontSize: 11),
+            ),
+          ],
         ],
       ),
     );

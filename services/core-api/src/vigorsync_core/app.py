@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import shutil
 from contextlib import asynccontextmanager
@@ -19,13 +20,14 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import Settings
 from .db import Database
 from .events import EventHub
 from .live_client import LiveClient, LiveEngineError
+from .offline_client import OfflineClient, OfflineWorkerError
 from .state import InvalidTransition, command_target, internal_target
 
 
@@ -76,7 +78,7 @@ class InternalFinalize(BaseModel):
 
 
 def public_session(record: dict[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         "session_id": record["session_id"],
         "status": record["status"],
         "exercise": record["exercise"],
@@ -91,11 +93,20 @@ def public_session(record: dict[str, Any]) -> dict[str, Any]:
         "live_summary": record["live_summary"],
         "error": record["error"],
     }
+    if record.get("job_id") is not None:
+        payload["analysis"] = {
+            "job_id": record["job_id"],
+            "stage": record.get("analysis_stage"),
+            "progress": record.get("analysis_progress") or 0.0,
+            "summary": record.get("analysis_summary"),
+        }
+    return payload
 
 
 def create_app(
     settings: Settings | None = None,
     live_client: LiveClient | None = None,
+    offline_client: OfflineClient | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.ensure_directories()
@@ -105,7 +116,13 @@ def create_app(
         settings.live_url,
         settings.live_internal_token,
     )
+    owns_offline_client = offline_client is None
+    offline = offline_client or OfflineClient(
+        settings.offline_url,
+        settings.offline_internal_token,
+    )
     hub = EventHub()
+    analysis_tasks: dict[str, asyncio.Task[None]] = {}
     latest_config: dict[str, Any] = {
         "exercise": "squat",
         "view": "side_left",
@@ -115,10 +132,23 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         try:
+            for record in database.list_sessions(status="analyzing", limit=100):
+                if record.get("job_id"):
+                    start_analysis_monitor(
+                        record["session_id"],
+                        record["job_id"],
+                    )
             yield
         finally:
+            tasks = list(analysis_tasks.values())
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             if owns_live_client:
                 await live.close()
+            if owns_offline_client:
+                await offline.close()
 
     app = FastAPI(title="VigorSync Core", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -220,6 +250,231 @@ def create_app(
         )
         return record
 
+    def analysis_summary(result: dict[str, Any]) -> dict[str, Any]:
+        sample = result.get("sample") or {}
+        issues = [
+            {
+                "issue_code": issue.get("issue_code"),
+                "title": issue.get("title"),
+                "detail": issue.get("detail"),
+                "cue": issue.get("cue"),
+                "severity": issue.get("severity"),
+                "confidence": issue.get("confidence"),
+                "anchor_s": issue.get("anchor_s"),
+                "evidence_interval_s": issue.get("evidence_interval_s") or [],
+            }
+            for issue in (result.get("issues") or [])
+            if not issue.get("suppressed")
+        ][:5]
+        return {
+            "status": sample.get("status") or "unknown",
+            "rep_count": sample.get("rep_count") or 0,
+            "rejected_rep_count": sample.get("rejected_rep_count") or 0,
+            "duration_s": sample.get("duration_seconds") or 0.0,
+            "quality_status": sample.get("quality_status") or "unknown",
+            "active_issue_count": sample.get("active_issue_count") or 0,
+            "severity_counts": sample.get("severity_counts") or {},
+            "mean_confidence": (
+                (result.get("confidence") or {}).get("mean_confidence") or 0.0
+            ),
+            "issues": issues,
+        }
+
+    async def mark_analysis_failed(
+        session_id: str,
+        code: str,
+        message: str,
+        *,
+        stage: str = "analysis_failed",
+    ) -> None:
+        record = get_session_or_404(session_id)
+        if record["status"] == "failed":
+            return
+        database.update_session(
+            session_id,
+            status="failed",
+            analysis_stage=stage,
+            error={"code": code, "message": message[:512]},
+        )
+        await append_and_publish(
+            session_id,
+            "session.state",
+            {"status": "failed", "previous_status": record["status"]},
+        )
+        await hub.publish(
+            "client",
+            {
+                "type": "error",
+                "version": "v1",
+                "session_id": session_id,
+                "error": {"code": code, "message": message[:512]},
+            },
+        )
+
+    async def monitor_analysis(session_id: str, job_id: str) -> None:
+        last_stage: str | None = None
+        last_progress = -1.0
+        deadline = asyncio.get_running_loop().time() + 15 * 60
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                job = await offline.get_job(job_id)
+            except OfflineWorkerError as exc:
+                await asyncio.sleep(2.0)
+                if asyncio.get_running_loop().time() >= deadline:
+                    await mark_analysis_failed(
+                        session_id,
+                        exc.code,
+                        str(exc),
+                    )
+                    return
+                continue
+
+            stage = str(job.get("stage") or "unknown")
+            progress = float(job.get("progress") or 0.0)
+            if stage != last_stage or progress != last_progress:
+                last_stage = stage
+                last_progress = progress
+                database.update_session(
+                    session_id,
+                    analysis_stage=stage,
+                    analysis_progress=progress,
+                )
+                progress_event = {
+                    "type": "report.progress",
+                    "version": "v1",
+                    "session_id": session_id,
+                    "payload": {
+                        "job_id": job_id,
+                        "stage": stage,
+                        "progress": progress,
+                    },
+                }
+                await hub.publish("client", progress_event)
+                await hub.publish("mirror", progress_event)
+
+            status = job.get("status")
+            if status == "succeeded":
+                try:
+                    result = await offline.get_result(job_id)
+                except OfflineWorkerError as exc:
+                    await mark_analysis_failed(
+                        session_id,
+                        exc.code,
+                        str(exc),
+                        stage="result",
+                    )
+                    return
+                summary = analysis_summary(result)
+                ticket = secrets.token_urlsafe(24)
+                report_url = (
+                    f"/api/v1/reports/{ticket}/report_v2.html"
+                )
+                previous_status = get_session_or_404(session_id)["status"]
+                database.update_session(
+                    session_id,
+                    status="completed",
+                    analysis_stage="completed",
+                    analysis_progress=1.0,
+                    analysis_summary=summary,
+                    report_ticket=ticket,
+                    report_url=report_url,
+                )
+                await append_and_publish(
+                    session_id,
+                    "session.state",
+                    {
+                        "status": "completed",
+                        "previous_status": previous_status,
+                    },
+                )
+                event = {
+                    "type": "report.ready",
+                    "version": "v1",
+                    "session_id": session_id,
+                    "job_id": job_id,
+                    "report_url": report_url,
+                    "summary": summary,
+                }
+                await hub.publish("client", event)
+                await hub.publish("mirror", event)
+                return
+            if status in {"failed", "cancelled"}:
+                await mark_analysis_failed(
+                    session_id,
+                    str(job.get("error_code") or f"analysis_{status}"),
+                    str(job.get("error_message") or "离线分析失败"),
+                    stage=stage,
+                )
+                return
+            await asyncio.sleep(1.0)
+
+        await mark_analysis_failed(
+            session_id,
+            "analysis_timeout",
+            "离线分析超时",
+        )
+
+    def start_analysis_monitor(session_id: str, job_id: str) -> None:
+        existing = analysis_tasks.get(session_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(monitor_analysis(session_id, job_id))
+        analysis_tasks[session_id] = task
+
+        def finish(_: asyncio.Task[None]) -> None:
+            if analysis_tasks.get(session_id) is task:
+                analysis_tasks.pop(session_id, None)
+
+        task.add_done_callback(finish)
+
+    async def enqueue_analysis(
+        session_id: str,
+        artifacts: dict[str, str],
+    ) -> dict[str, Any]:
+        record = get_session_or_404(session_id)
+        job_id = record.get("job_id") or f"job_{secrets.token_hex(8)}"
+        video_path = artifacts.get("video_path")
+        database.update_session(
+            session_id,
+            job_id=job_id,
+            analysis_stage="queued",
+            analysis_progress=0.0,
+        )
+        if not video_path or not Path(video_path).is_file():
+            await mark_analysis_failed(
+                session_id,
+                "artifact_missing",
+                "训练视频不存在，无法创建离线分析任务",
+                stage="validate_artifacts",
+            )
+            return get_session_or_404(session_id)
+        try:
+            await offline.enqueue(
+                {
+                    "job_id": job_id,
+                    "session_id": session_id,
+                    "source_path": video_path,
+                    "exercise": record["exercise"],
+                    "view": record["view"],
+                    "rotation": "none",
+                },
+            )
+        except OfflineWorkerError as exc:
+            await mark_analysis_failed(
+                session_id,
+                "analysis_enqueue_failed",
+                str(exc),
+                stage="enqueue",
+            )
+            return get_session_or_404(session_id)
+        database.update_session(
+            session_id,
+            analysis_stage="queued",
+            analysis_progress=0.0,
+        )
+        start_analysis_monitor(session_id, job_id)
+        return get_session_or_404(session_id)
+
     async def create_session(payload: SessionCreate) -> dict[str, Any]:
         session_id = f"s_{secrets.token_hex(12)}"
         return database.create_session(
@@ -301,7 +556,11 @@ def create_app(
                 artifacts=result.get("artifacts"),
                 live_summary=result.get("summary"),
             )
-            target = "analyzing"
+            await set_session_status(session_id, "analyzing", record["status"])
+            return await enqueue_analysis(
+                session_id,
+                result.get("artifacts") or {},
+            )
         return await set_session_status(session_id, target, record["status"])
 
     @app.get("/api/v1/health")
@@ -311,11 +570,21 @@ def create_app(
             await live.health()
         except LiveEngineError:
             live_status = "unavailable"
+        offline_status = "ok"
+        try:
+            await offline.health()
+        except OfflineWorkerError:
+            offline_status = "unavailable"
+        overall = (
+            "ok"
+            if live_status == "ok" and offline_status == "ok"
+            else "degraded"
+        )
         return {
-            "status": "ok" if live_status == "ok" else "degraded",
+            "status": overall,
             "version": "0.1.0",
             "live_engine": live_status,
-            "offline_worker": "not_configured",
+            "offline_worker": offline_status,
         }
 
     @app.post("/api/v1/pairing/claim")
@@ -508,8 +777,75 @@ def create_app(
             "job_id": record["job_id"],
             "status": record["status"],
             "report_url": record["report_url"],
-            "summary": {},
+            "summary": record.get("analysis_summary") or {},
         }
+
+    @app.get("/api/v1/reports/{report_ticket}/{asset_path:path}")
+    async def report_asset(
+        report_ticket: str,
+        asset_path: str,
+    ) -> Response:
+        record = database.get_session_by_report_ticket(report_ticket)
+        if record is None or not record.get("job_id"):
+            raise HTTPException(status_code=404, detail="report_not_found")
+        job_id = record["job_id"]
+        if settings.offline_data_root is None:
+            raise HTTPException(status_code=503, detail="offline_data_unavailable")
+        artifacts_dir = (
+            settings.offline_data_root
+            / "jobs"
+            / job_id
+            / "artifacts"
+            / job_id
+        ).resolve()
+
+        if asset_path in {"", "report.html", "report_v2.html"}:
+            html_path = artifacts_dir / "report_v2.html"
+            if not html_path.is_file():
+                raise HTTPException(status_code=404, detail="report_not_found")
+            html = html_path.read_text(encoding="utf-8")
+            worker_prefix = f"/api/v1/jobs/{job_id}"
+            public_prefix = f"/api/v1/reports/{report_ticket}"
+            html = html.replace(
+                f"{worker_prefix}/media",
+                f"{public_prefix}/media",
+            ).replace(
+                f"{worker_prefix}/frames/",
+                f"{public_prefix}/frames/",
+            )
+            return Response(
+                content=html,
+                media_type="text/html",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        if asset_path == "media":
+            path = artifacts_dir / "media" / f"{job_id}_clip.webm"
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="media_not_found")
+            return FileResponse(
+                path,
+                media_type="video/webm",
+                filename=path.name,
+            )
+
+        if asset_path.startswith("frames/"):
+            frame_name = asset_path.removeprefix("frames/")
+            if not frame_name or Path(frame_name).name != frame_name:
+                raise HTTPException(status_code=404, detail="frame_not_found")
+            path = (artifacts_dir / "annotated_frames" / frame_name).resolve()
+            try:
+                path.relative_to(artifacts_dir / "annotated_frames")
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail="frame_not_found",
+                ) from exc
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="frame_not_found")
+            return FileResponse(path, media_type="image/png")
+
+        raise HTTPException(status_code=404, detail="report_asset_not_found")
 
     @app.delete(
         "/api/v1/sessions/{session_id}/media",
@@ -536,13 +872,14 @@ def create_app(
     )
     async def delete_session(session_id: str) -> dict[str, Any]:
         record = get_session_or_404(session_id)
-        if record["status"] in {
+        in_progress = record["status"] in {
             "created",
             "preparing",
             "active",
             "paused",
             "stopping",
-        }:
+        } or (record["status"] == "analyzing" and record.get("job_id"))
+        if in_progress:
             raise HTTPException(status_code=409, detail="session_in_progress")
 
         session_root = settings.session_root.resolve()
@@ -569,6 +906,20 @@ def create_app(
             raise
         if staged is not None:
             shutil.rmtree(staged)
+
+        job_id = record.get("job_id")
+        if job_id and settings.offline_data_root is not None:
+            jobs_root = (settings.offline_data_root / "jobs").resolve()
+            offline_job = (jobs_root / job_id).resolve()
+            try:
+                offline_job.relative_to(jobs_root)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid_offline_job_path",
+                ) from exc
+            if offline_job.is_dir():
+                shutil.rmtree(offline_job)
 
         payload = {
             "type": "session.deleted",
@@ -626,24 +977,25 @@ def create_app(
         payload: InternalFinalize,
     ) -> dict[str, Any]:
         record = get_session_or_404(session_id)
-        job_id = f"job_{secrets.token_hex(8)}"
         target = internal_target(record["status"], "finalize_accepted")
         database.update_session(
             session_id,
-            status=target,
-            job_id=job_id,
             artifacts=payload.artifacts,
             live_summary=payload.summary,
         )
-        await append_and_publish(
+        await set_session_status(
             session_id,
-            "session.state",
-            {"status": target, "previous_status": record["status"]},
+            target,
+            record["status"],
+        )
+        analyzed = await enqueue_analysis(
+            session_id,
+            payload.artifacts,
         )
         return {
             "session_id": session_id,
-            "status": target,
-            "job_id": job_id,
+            "status": analyzed["status"],
+            "job_id": analyzed["job_id"],
         }
 
     @app.get("/dev/v1/bootstrap")

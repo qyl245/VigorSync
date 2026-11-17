@@ -14,10 +14,12 @@ sys.path.insert(0, str(SRC))
 
 from vigorsync_core.app import create_app
 from vigorsync_core.config import Settings
+from vigorsync_core.db import Database
 
 
 class FakeLive:
-    def __init__(self) -> None:
+    def __init__(self, root: Path) -> None:
+        self.root = root
         self.calls: list[tuple[str, str | None]] = []
 
     async def start(
@@ -43,11 +45,13 @@ class FakeLive:
 
     async def stop(self, session_id: str) -> dict[str, Any]:
         self.calls.append(("stop", session_id))
+        video = self.root / "video.mp4"
+        video.write_bytes(b"video")
         return {
             "session_id": session_id,
             "status": "finalized",
             "artifacts": {
-                "video_path": "/tmp/video.mp4",
+                "video_path": str(video),
                 "landmarks_path": "/tmp/landmarks.jsonl",
                 "events_path": "/tmp/events.jsonl",
                 "summary_path": "/tmp/summary.json",
@@ -64,6 +68,60 @@ class FakeLive:
         return {"status": "ok"}
 
 
+class FakeOffline:
+    def __init__(self) -> None:
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.calls: list[tuple[str, str]] = []
+
+    async def enqueue(self, payload: dict[str, Any]) -> dict[str, Any]:
+        job_id = payload["job_id"]
+        self.calls.append(("enqueue", job_id))
+        self.jobs[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "stage": "queued",
+            "progress": 0.0,
+        }
+        return self.jobs[job_id]
+
+    async def get_job(self, job_id: str) -> dict[str, Any]:
+        return self.jobs[job_id]
+
+    async def get_result(self, job_id: str) -> dict[str, Any]:
+        self.calls.append(("result", job_id))
+        return {
+            "sample": {
+                "status": "ok",
+                "rep_count": 8,
+                "rejected_rep_count": 0,
+                "duration_seconds": 12.5,
+                "quality_status": "pass",
+                "active_issue_count": 1,
+                "severity_counts": {"high": 1, "medium": 0, "low": 0},
+            },
+            "confidence": {"mean_confidence": 0.9},
+            "issues": [
+                {
+                    "issue_code": "pushup_tempo_inconsistent",
+                    "title": "节奏变化",
+                    "detail": "测试问题",
+                    "cue": "保持节奏",
+                    "severity": "high",
+                    "confidence": 0.8,
+                    "anchor_s": 3.2,
+                    "evidence_interval_s": [2.8, 3.8],
+                    "suppressed": False,
+                }
+            ],
+        }
+
+    async def cancel(self, job_id: str) -> None:
+        self.calls.append(("cancel", job_id))
+
+    async def health(self) -> dict[str, Any]:
+        return {"status": "ok"}
+
+
 class CoreApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -74,11 +132,14 @@ class CoreApiTests(unittest.TestCase):
             session_root=root / "sessions",
             port=8011,
             live_url="http://127.0.0.1:8020",
+            offline_url="http://127.0.0.1:8030",
+            offline_data_root=root / "offline",
             mirror_token="mirror-test",
             pairing_code="123456",
         )
-        self.live = FakeLive()
-        self.app = create_app(self.settings, self.live)
+        self.live = FakeLive(root)
+        self.offline = FakeOffline()
+        self.app = create_app(self.settings, self.live, self.offline)
         self.client = TestClient(self.app)
         response = self.client.post(
             "/api/v1/pairing/claim",
@@ -396,6 +457,12 @@ class CoreApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(200, stopped.status_code, stopped.text)
+        Database(self.settings.db_path).update_session(
+            session_id,
+            status="completed",
+            analysis_stage="completed",
+            analysis_progress=1.0,
+        )
         deleted = self.client.delete(
             f"/api/v1/sessions/{session_id}",
             headers={"Authorization": f"Bearer {self.token}"},
@@ -408,6 +475,92 @@ class CoreApiTests(unittest.TestCase):
             headers={"Authorization": f"Bearer {self.token}"},
         ).json()["items"]
         self.assertNotIn(session_id, {item["session_id"] for item in listed})
+
+    def test_offline_result_is_published_and_report_is_served(self) -> None:
+        session = self.create_session()
+        session_id = session["session_id"]
+        command_headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Idempotency-Key": "start-offline-1",
+        }
+        started = self.client.post(
+            f"/api/v1/sessions/{session_id}/start",
+            headers=command_headers,
+        )
+        self.assertEqual(200, started.status_code, started.text)
+        self.client.post(
+            f"/api/v1/internal/sessions/{session_id}/state",
+            json={
+                "status": "active",
+                "t_ms": 0,
+                "payload": {
+                    "exercise": "squat",
+                    "phase": "up",
+                    "reps": 8,
+                    "confidence": 0.9,
+                    "fps": 18.0,
+                    "paused": False,
+                },
+            },
+        )
+        stopped = self.client.post(
+            f"/api/v1/sessions/{session_id}/stop",
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Idempotency-Key": "stop-offline-1",
+            },
+        )
+        self.assertEqual(200, stopped.status_code, stopped.text)
+        job_id = stopped.json()["job_id"]
+        ticket = "report-ticket-test"
+        summary = {
+            "rep_count": 8,
+            "quality_status": "pass",
+            "active_issue_count": 1,
+        }
+        Database(self.settings.db_path).update_session(
+            session_id,
+            status="completed",
+            analysis_stage="completed",
+            analysis_progress=1.0,
+            analysis_summary=summary,
+            report_ticket=ticket,
+            report_url=f"/api/v1/reports/{ticket}/report_v2.html",
+        )
+        current = self.client.get(
+            f"/api/v1/sessions/{session_id}",
+            headers={"Authorization": f"Bearer {self.token}"},
+        ).json()
+        self.assertEqual("completed", current["status"])
+        report = self.client.get(
+            f"/api/v1/sessions/{session_id}/report",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        self.assertEqual(200, report.status_code, report.text)
+        self.assertEqual(8, report.json()["summary"]["rep_count"])
+
+        report_dir = (
+            self.settings.offline_data_root
+            / "jobs"
+            / job_id
+            / "artifacts"
+            / job_id
+        )
+        (report_dir / "media").mkdir(parents=True)
+        (report_dir / "annotated_frames").mkdir()
+        (report_dir / "report_v2.html").write_text(
+            (
+                f'<video src="/api/v1/jobs/{job_id}/media"></video>'
+                f'<img src="/api/v1/jobs/{job_id}/frames/evidence.png">'
+            ),
+            encoding="utf-8",
+        )
+        public = self.client.get(current["report_url"])
+        self.assertEqual(200, public.status_code, public.text)
+        self.assertIn(
+            f"/api/v1/reports/{current['report_url'].split('/')[4]}/media",
+            public.text,
+        )
 
 
 if __name__ == "__main__":

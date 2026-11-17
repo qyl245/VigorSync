@@ -35,6 +35,15 @@ const elements = {
   summaryConfidence: document.querySelector("#summary-confidence"),
   summaryFps: document.querySelector("#summary-fps"),
   summaryPath: document.querySelector("#summary-path"),
+  analysisStatus: document.querySelector("#analysis-status"),
+  analysisStatusText: document.querySelector("#analysis-status-text"),
+  analysisProgressBar: document.querySelector("#analysis-progress-bar"),
+  analysisFinding: document.querySelector("#analysis-finding"),
+  analysisQuality: document.querySelector("#analysis-quality"),
+  analysisIssue: document.querySelector("#analysis-issue"),
+  openReportButton: document.querySelector("#open-report-button"),
+  latestReport: document.querySelector("#latest-report"),
+  latestReportLink: document.querySelector("#latest-report-link"),
   restartButton: document.querySelector("#restart-button"),
 };
 
@@ -294,6 +303,10 @@ function handleMirrorMessage(message) {
     restart();
     return;
   }
+  if (message.type === "report.ready") {
+    applyReportReady(message);
+    return;
+  }
   if (message.type === "session.start" && message.session_id) {
     const session = {
       status: "preparing",
@@ -319,6 +332,8 @@ function handleMirrorMessage(message) {
     showAlert(message.payload.message);
   } else if (message.type === "session.state") {
     handleSessionState(message.session_id, message.payload);
+  } else if (message.type === "report.progress") {
+    updateAnalysisProgress(message.payload);
   }
 }
 
@@ -335,13 +350,45 @@ function handleSessionState(sessionId, payload) {
     setConnection("实时连接", true);
   } else if (status === "failed") {
     setConnection("发生错误");
-    showAlert("实时引擎发生错误，请结束本次训练后重试。");
+    elements.analysisStatusText.textContent = "分析失败";
+    elements.analysisProgressBar.style.width = "0%";
+    showAlert("训练或离线分析发生错误，请查看历史记录。");
   } else if (["analyzing", "completed", "cancelled"].includes(status)) {
     showSummary(sessionId).catch((error) => {
       setConnection("会话已结束");
       showAlert(error.message);
     });
   }
+}
+
+function updateAnalysisProgress(payload) {
+  if (!payload) return;
+  const progress = Math.max(0, Math.min(1, Number(payload.progress) || 0));
+  elements.analysisStatusText.textContent =
+    `${payload.stage || "queued"} · ${Math.round(progress * 100)}%`;
+  elements.analysisProgressBar.style.width = `${progress * 100}%`;
+}
+
+function applyReportReady(message) {
+  const summary = message.summary || {};
+  const reportUrl = message.report_url;
+  if (!reportUrl) return;
+  const absoluteUrl = new URL(reportUrl, `${CORE_URL}/`).href;
+  elements.openReportButton.href = absoluteUrl;
+  elements.openReportButton.hidden = false;
+  elements.latestReportLink.href = absoluteUrl;
+  elements.latestReport.hidden = false;
+  elements.analysisStatusText.textContent = "已完成";
+  elements.analysisProgressBar.style.width = "100%";
+  elements.analysisFinding.hidden = false;
+  if (currentSession?.session_id === message.session_id) {
+    elements.summaryReps.textContent = String(summary.rep_count ?? 0);
+  }
+  elements.analysisQuality.textContent =
+    `离线计数 ${summary.rep_count ?? 0} · 质量 ${summary.quality_status || "unknown"}`;
+  const firstIssue = (summary.issues || [])[0];
+  elements.analysisIssue.textContent =
+    firstIssue?.title || "本次未发现可靠问题";
 }
 
 async function waitUntilReady(sessionId) {
@@ -428,6 +475,19 @@ async function syncCurrentSession() {
       const detail = await request(`/dev/v1/sessions/${active.session_id}`);
       await attachSession(detail);
       return;
+    }
+    if (!currentSession) {
+      const latestReport = response.items?.find((item) => item.report_url);
+      if (latestReport) {
+        const detail = await request(
+          `/dev/v1/sessions/${latestReport.session_id}`,
+        );
+        applyReportReady({
+          session_id: detail.session_id,
+          report_url: detail.report_url,
+          summary: detail.analysis?.summary || {},
+        });
+      }
     }
     if (currentSession && isLiveStatus(currentSession.status)) {
       const detail = await request(
@@ -536,6 +596,19 @@ async function showSummary(sessionId, detail = null) {
     ? `${Number(fps).toFixed(1)} FPS`
     : "--";
   elements.summaryPath.textContent = session.artifacts?.summary_path || "";
+  elements.openReportButton.hidden = true;
+  elements.analysisFinding.hidden = true;
+  elements.analysisStatusText.textContent =
+    session.analysis?.stage || "queued";
+  elements.analysisProgressBar.style.width =
+    `${Math.round((Number(session.analysis?.progress) || 0) * 100)}%`;
+  if (session.report_url) {
+    applyReportReady({
+      session_id: session.session_id,
+      report_url: session.report_url,
+      summary: session.analysis?.summary || {},
+    });
+  }
 }
 
 function restart() {
@@ -549,6 +622,7 @@ function restart() {
   elements.setupPanel.hidden = false;
   elements.setupError.textContent = "";
   elements.pauseButton.textContent = "暂停";
+  elements.openReportButton.hidden = true;
 }
 
 elements.startForm.addEventListener("submit", startSession);
