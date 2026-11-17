@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+. (Join-Path $PSScriptRoot "python-env.ps1")
+$python = Resolve-VigorSyncPython -ProjectRoot $projectRoot
 $launcher = Join-Path $projectRoot "apps\desktop\launcher.py"
 $dist = Join-Path $projectRoot "dist\VigorSyncLauncher"
 $condaBin = "D:\Anaconda\Library\bin"
@@ -12,7 +13,7 @@ $runtimeDlls = @(
 )
 
 if (-not (Test-Path -LiteralPath $python)) {
-    throw "VigorSync .venv was not found."
+    throw "VigorSync Python interpreter was not found."
 }
 
 Push-Location $projectRoot

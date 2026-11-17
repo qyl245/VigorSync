@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "python-env.ps1")
 $runtimeDir = Join-Path $projectRoot "webdata\runtime"
 $statePath = Join-Path $runtimeDir "mirror-state.json"
 $liveLog = Join-Path $runtimeDir "live-engine.log"
@@ -18,7 +19,7 @@ $offlineErr = Join-Path $runtimeDir "offline-worker.err.log"
 $mirrorLog = Join-Path $runtimeDir "mirror.log"
 $mirrorErr = Join-Path $runtimeDir "mirror.err.log"
 $browserProfile = Join-Path $runtimeDir "browser-profile"
-$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$python = Resolve-VigorSyncPython -ProjectRoot $projectRoot
 $mirrorUrl = "http://127.0.0.1:8080"
 $liveHealth = "http://127.0.0.1:8020/api/v1/health"
 $coreHealth = "http://127.0.0.1:8011/api/v1/health"
@@ -171,7 +172,7 @@ if ($Action -eq "status") {
 }
 
 if (-not (Test-Path -LiteralPath $python)) {
-    throw "VigorSync .venv was not found at $python"
+    throw "VigorSync Python interpreter was not found at $python"
 }
 
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null

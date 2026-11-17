@@ -1,10 +1,11 @@
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+. (Join-Path $PSScriptRoot "python-env.ps1")
+$python = Resolve-VigorSyncPython -ProjectRoot $projectRoot
 
 if (-not (Test-Path -LiteralPath $python)) {
-    throw "VigorSync .venv was not found. Create it with D:\Anaconda\python.exe -m venv .venv."
+    throw "VigorSync Python interpreter was not found at $python."
 }
 
 Push-Location $projectRoot
