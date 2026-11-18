@@ -189,6 +189,13 @@ if ($null -eq $state) {
         browserProfile = $browserProfile
     }
 }
+else {
+    foreach ($pidField in @("livePid", "mirrorPid", "corePid", "offlinePid")) {
+        if ($state.PSObject.Properties.Name -notcontains $pidField) {
+            $state | Add-Member -NotePropertyName $pidField -NotePropertyValue $null
+        }
+    }
+}
 $state.startedAt = (Get-Date).ToString("o")
 
 $startedLive = $null
@@ -266,6 +273,9 @@ try {
         }
         $state.corePid = Get-PortOwner -Port 8011
     }
+    else {
+        $state.corePid = Get-PortOwner -Port 8011
+    }
 
     if (-not (Test-HttpOk -Url $liveHealth)) {
         if (Get-PortOwner -Port 8020) {
@@ -297,7 +307,7 @@ try {
         $state.livePid = Get-PortOwner -Port 8020
     }
     elseif (-not (Test-ExactProcess -ProcessId ([int]$state.livePid) -ExpectedText "vigorsync_live")) {
-        $state.livePid = $null
+        $state.livePid = Get-PortOwner -Port 8020
     }
 
     if (-not (Test-HttpOk -Url $mirrorUrl)) {
@@ -319,7 +329,7 @@ try {
         $state.mirrorPid = Get-PortOwner -Port 8080
     }
     elseif (-not (Test-ExactProcess -ProcessId ([int]$state.mirrorPid) -ExpectedText "apps\mirror\server.py")) {
-        $state.mirrorPid = $null
+        $state.mirrorPid = Get-PortOwner -Port 8080
     }
 
     $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8

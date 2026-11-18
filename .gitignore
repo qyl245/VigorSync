@@ -12,3 +12,10 @@ dist/
 .playwright-cli/
 output/
 .vscode/settings.json
+
+# Local reference material and generated inspection artifacts
+.screenshots/
+.trae-html-share-packages/
+window*.xml
+vigorsync-pairing.png
+文献/
