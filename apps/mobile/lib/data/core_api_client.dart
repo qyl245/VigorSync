@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -13,6 +14,16 @@ class CoreApiException implements Exception {
 
   @override
   String toString() => message;
+}
+
+bool shouldReturnToPairing(Object error) {
+  return error is SocketException ||
+      error is TimeoutException ||
+      error is HttpException ||
+      error is HandshakeException ||
+      error is WebSocketException ||
+      (error is CoreApiException &&
+          (error.statusCode == 401 || error.statusCode == 403));
 }
 
 class CoreApiClient {
@@ -125,11 +136,7 @@ class CoreApiClient {
     await _request(
       'POST',
       '/api/v1/control/config',
-      body: {
-        'exercise': exercise,
-        'view': view,
-        'target_reps': targetReps,
-      },
+      body: {'exercise': exercise, 'view': view, 'target_reps': targetReps},
     );
   }
 
@@ -161,11 +168,7 @@ class CoreApiClient {
       'POST',
       '/api/v1/sessions/start',
       idempotencyKey: _newIdempotencyKey(),
-      body: {
-        'exercise': exercise,
-        'view': view,
-        'target_reps': targetReps,
-      },
+      body: {'exercise': exercise, 'view': view, 'target_reps': targetReps},
     );
     return SessionRecord.fromJson(payload);
   }
@@ -174,6 +177,15 @@ class CoreApiClient {
     final payload = await _request(
       'POST',
       '/api/v1/sessions/$sessionId/start',
+      idempotencyKey: _newIdempotencyKey(),
+    );
+    return SessionRecord.fromJson(payload);
+  }
+
+  Future<SessionRecord> cancelSession(String sessionId) async {
+    final payload = await _request(
+      'POST',
+      '/api/v1/sessions/$sessionId/cancel',
       idempotencyKey: _newIdempotencyKey(),
     );
     return SessionRecord.fromJson(payload);
@@ -213,14 +225,13 @@ class CoreApiClient {
   String resolveUrl(String value) {
     final uri = Uri.parse(value);
     if (uri.hasScheme) return value;
-    return Uri.parse('$baseUrl/').resolve(value.replaceFirst(RegExp(r'^/'), '')).toString();
+    return Uri.parse('$baseUrl/')
+        .resolve(value.replaceFirst(RegExp(r'^/'), ''))
+        .toString();
   }
 
   Future<void> dismissMirrorSession(String sessionId) async {
-    await _request(
-      'POST',
-      '/api/v1/sessions/$sessionId/mirror/dismiss',
-    );
+    await _request('POST', '/api/v1/sessions/$sessionId/mirror/dismiss');
   }
 
   Future<void> deleteSession(String sessionId) async {
@@ -231,11 +242,99 @@ class CoreApiClient {
     final wsBase = baseUrl.replaceFirst(RegExp(r'^http'), 'ws');
     final socket = await WebSocket.connect(
       '$wsBase/api/v1/ws/client',
-      headers: {
-        HttpHeaders.authorizationHeader: 'Bearer ${credentials.token}',
-      },
+      headers: {HttpHeaders.authorizationHeader: 'Bearer ${credentials.token}'},
     ).timeout(const Duration(seconds: 5));
     return socket;
+  }
+
+  Future<Map<String, dynamic>> getWeather() async {
+    return _request('GET', '/api/v1/weather');
+  }
+
+  Future<List<Map<String, dynamic>>> getTrend({int days = 7}) async {
+    final payload = await _request('GET', '/api/v1/stats/trend?days=$days');
+    final items = payload['days'] as List<dynamic>? ?? const [];
+    return items.whereType<Map<String, dynamic>>().toList();
+  }
+
+  Future<Map<String, dynamic>> getMirrorLayout() async {
+    return _request('GET', '/api/v1/mirror/layout');
+  }
+
+  Future<Map<String, dynamic>> updateMirrorLayout(
+    List<Map<String, dynamic>> modules,
+  ) async {
+    return _request('PUT', '/api/v1/mirror/layout', body: {'modules': modules});
+  }
+
+  Future<void> updateMirrorFocus(String page) async {
+    await _request('POST', '/api/v1/control/focus', body: {'page': page});
+  }
+
+  Future<void> updateMirrorTheme(String mode) async {
+    await _request('POST', '/api/v1/control/theme', body: {'mode': mode});
+  }
+
+  Future<List<Map<String, dynamic>>> listPairedDevices() async {
+    final payload = await _request('GET', '/api/v1/pairing/devices');
+    final items = payload['items'] as List<dynamic>? ?? const [];
+    return items.whereType<Map<String, dynamic>>().toList();
+  }
+
+  Future<Map<String, dynamic>> getPairingIdentity() async {
+    return _request('GET', '/api/v1/pairing/me');
+  }
+
+  Future<void> revokeCurrentPairing() async {
+    await _request('DELETE', '/api/v1/pairing/current');
+  }
+
+  Future<Map<String, dynamic>> getTodos({String? date}) async {
+    final query = date == null ? '' : '?date=${Uri.encodeQueryComponent(date)}';
+    return _request('GET', '/api/v1/todos$query');
+  }
+
+  Future<Map<String, dynamic>> createTodo(String title) async {
+    return _request('POST', '/api/v1/todos', body: {'title': title});
+  }
+
+  Future<Map<String, dynamic>> updateTodo(
+    String id, {
+    String? title,
+    bool? completed,
+    int? sortOrder,
+  }) async {
+    final body = <String, dynamic>{};
+    if (title != null) body['title'] = title;
+    if (completed != null) body['completed'] = completed;
+    if (sortOrder != null) body['sort_order'] = sortOrder;
+    return _request(
+      'PATCH',
+      '/api/v1/todos/${Uri.encodeComponent(id)}',
+      body: body,
+    );
+  }
+
+  Future<void> deleteTodo(String id) async {
+    await _request('DELETE', '/api/v1/todos/${Uri.encodeComponent(id)}');
+  }
+
+  Future<List<Map<String, dynamic>>> getWeeklyPlans() async {
+    final payload = await _request('GET', '/api/v1/weekly-plans');
+    final items = payload['items'] as List<dynamic>? ?? const [];
+    return items.whereType<Map<String, dynamic>>().toList();
+  }
+
+  Future<List<Map<String, dynamic>>> replaceWeeklyPlans(
+    List<Map<String, dynamic>> items,
+  ) async {
+    final payload = await _request(
+      'PUT',
+      '/api/v1/weekly-plans',
+      body: {'items': items},
+    );
+    final result = payload['items'] as List<dynamic>? ?? const [];
+    return result.whereType<Map<String, dynamic>>().toList();
   }
 
   void close() {

@@ -24,6 +24,7 @@ tags:
   - name: internal
   - name: live-engine
   - name: websocket
+  - name: home
 x-contract-version: v1
 x-session-state-machine: ./session-state-machine.json
 x-trust-boundaries:
@@ -611,6 +612,428 @@ components:
           additionalProperties: false
       additionalProperties: false
 
+    WeatherResponse:
+      type: object
+      required: [status, fetched_at]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        temperature_c:
+          type: [number, 'null']
+        humidity:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 100
+        weather_code:
+          type: [integer, 'null']
+        weather_text:
+          type: [string, 'null']
+        temp_min_c:
+          type: [number, 'null']
+        temp_max_c:
+          type: [number, 'null']
+        fetched_at:
+          type: string
+          format: date-time
+        cached:
+          type: boolean
+          default: false
+      additionalProperties: false
+
+    TrendDay:
+      type: object
+      required: [date, sessions, duration_s, reps]
+      properties:
+        date:
+          type: string
+          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+        sessions:
+          type: integer
+          minimum: 0
+        duration_s:
+          type: number
+          minimum: 0
+        reps:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+
+    TrendResponse:
+      type: object
+      required: [days]
+      properties:
+        days:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrendDay'
+      additionalProperties: false
+
+    MirrorModule:
+      type: object
+      required: [id, size, column, order]
+      properties:
+        id:
+          type: string
+          enum: [weather, trend, todo, weekly_plan]
+        size:
+          type: string
+          enum: ['1x1', '1x2']
+        column:
+          type: string
+          enum: [left, right]
+        order:
+          type: integer
+          minimum: 0
+          maximum: 3
+      additionalProperties: false
+
+    MirrorLayout:
+      type: object
+      required: [version, modules, updated_at]
+      properties:
+        version:
+          type: integer
+          const: 2
+        modules:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/MirrorModule'
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    MirrorFocusRequest:
+      type: object
+      required: [page]
+      properties:
+        page:
+          type: string
+          enum: [home, training, history, profile]
+      additionalProperties: false
+
+    MirrorFocusResponse:
+      type: object
+      required: [page, delivered]
+      properties:
+        page:
+          type: string
+          enum: [home, training, history, profile]
+        delivered:
+          const: true
+      additionalProperties: false
+
+    MirrorThemeRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [light, dark]
+      additionalProperties: false
+
+    MirrorThemeResponse:
+      type: object
+      required: [mode, delivered]
+      properties:
+        mode:
+          type: string
+          enum: [light, dark]
+        delivered:
+          const: true
+      additionalProperties: false
+
+    PairingDeviceList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PairingDevice'
+      additionalProperties: false
+
+    PairingDevice:
+      type: object
+      required: [device_name, platform, created_at]
+      properties:
+        device_name:
+          type: string
+        platform:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    PairingRevokeResponse:
+      type: object
+      required: [revoked]
+      properties:
+        revoked:
+          type: boolean
+      additionalProperties: false
+
+    TodoItem:
+      type: object
+      required: [id, title, completed, todo_date, sort_order, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        completed:
+          type: boolean
+        todo_date:
+          type: string
+          format: date
+        sort_order:
+          type: integer
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    TodoListResponse:
+      type: object
+      required: [date, items, completed, total]
+      properties:
+        date:
+          type: string
+          format: date
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TodoItem'
+        completed:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+
+    TodoCreateRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        todo_date:
+          type: string
+          format: date
+        sort_order:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+
+    TodoUpdateRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        completed:
+          type: boolean
+        sort_order:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+
+    WeeklyPlanItem:
+      type: object
+      required: [id, weekday, exercise, target_reps, sort_order, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        weekday:
+          type: integer
+          minimum: 1
+          maximum: 7
+        exercise:
+          type: string
+          enum: [squat, pushup]
+        view:
+          type: [string, 'null']
+          enum: [front, rear, oblique_left, oblique_right, side_left, side_right, unknown, null]
+        sets:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 20
+        target_reps:
+          type: integer
+          minimum: 1
+          maximum: 500
+        note:
+          type: [string, 'null']
+          maxLength: 300
+        sort_order:
+          type: integer
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    WeeklyPlanListResponse:
+      type: object
+      required: [items, updated_at]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WeeklyPlanItem'
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    WeeklyPlanInput:
+      type: object
+      required: [weekday, exercise, target_reps]
+      properties:
+        id:
+          type: string
+        weekday:
+          type: integer
+          minimum: 1
+          maximum: 7
+        exercise:
+          type: string
+          enum: [squat, pushup]
+        view:
+          type: [string, 'null']
+          enum: [front, rear, oblique_left, oblique_right, side_left, side_right, unknown, null]
+        sets:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 20
+        target_reps:
+          type: integer
+          minimum: 1
+          maximum: 500
+        note:
+          type: [string, 'null']
+          maxLength: 300
+        sort_order:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+
+    WeeklyPlanBatchUpdate:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/WeeklyPlanInput'
+      additionalProperties: false
+
+    TodoUpdatedMessage:
+      type: object
+      required: [type, version, payload]
+      properties:
+        type:
+          const: todo.updated
+        version:
+          const: v1
+        payload:
+          $ref: '#/components/schemas/TodoListResponse'
+      additionalProperties: false
+
+    WeeklyPlanUpdatedMessage:
+      type: object
+      required: [type, version, payload]
+      properties:
+        type:
+          const: weekly_plan.updated
+        version:
+          const: v1
+        payload:
+          $ref: '#/components/schemas/WeeklyPlanListResponse'
+      additionalProperties: false
+
+    MirrorLayoutMessage:
+      type: object
+      required: [type, version, payload]
+      properties:
+        type:
+          const: mirror.layout
+        version:
+          const: v1
+        payload:
+          $ref: '#/components/schemas/MirrorLayout'
+      additionalProperties: false
+
+    MirrorPageMessage:
+      type: object
+      required: [type, version, payload]
+      properties:
+        type:
+          const: mirror.page
+        version:
+          const: v1
+        payload:
+          type: object
+          required: [page]
+          properties:
+            page:
+              type: string
+              enum: [home, training, history, profile]
+          additionalProperties: false
+      additionalProperties: false
+
+    MirrorThemeMessage:
+      type: object
+      required: [type, version, payload]
+      properties:
+        type:
+          const: mirror.theme
+        version:
+          const: v1
+        payload:
+          type: object
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [light, dark]
+          additionalProperties: false
+      additionalProperties: false
+
+    PairingStateMessage:
+      type: object
+      required: [type, version, payload]
+      properties:
+        type:
+          const: pairing.state
+        version:
+          const: v1
+        payload:
+          type: object
+          required: [connected]
+          properties:
+            connected:
+              type: boolean
+          additionalProperties: false
+      additionalProperties: false
+
 paths:
   /api/v1/health:
     get:
@@ -676,6 +1099,434 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/weather:
+    get:
+      tags: [home]
+      operationId: getWeather
+      summary: Read the cached weather snapshot proxied from Open-Meteo
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Weather snapshot; status unavailable when the upstream failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WeatherResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/stats/trend:
+    get:
+      tags: [home]
+      operationId: getTrainingTrend
+      summary: Aggregate finished training sessions per local day
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 31
+            default: 7
+      responses:
+        '200':
+          description: Per-day aggregation ordered ascending by date.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrendResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/mirror/layout:
+    get:
+      tags: [home]
+      operationId: getMirrorLayout
+      summary: Read the mirror home module arrangement
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current mirror layout; defaults are returned before the first write.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MirrorLayout'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags: [home, websocket]
+      operationId: updateMirrorLayout
+      summary: Replace the mirror home module arrangement and push it to the mirror
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [modules]
+              properties:
+                modules:
+                  type: array
+                  maxItems: 8
+                  items:
+                    $ref: '#/components/schemas/MirrorModule'
+              additionalProperties: false
+      responses:
+        '200':
+          description: Layout stored; a mirror.layout message is broadcast to the mirror.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MirrorLayout'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/control/focus:
+    post:
+      tags: [home, websocket]
+      operationId: updateMirrorFocus
+      summary: Tell the mirror which mobile page is in focus so the mirror can follow
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MirrorFocusRequest'
+      responses:
+        '200':
+          description: A mirror.page message is broadcast to the mirror.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MirrorFocusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/control/theme:
+    post:
+      tags: [home, websocket]
+      operationId: updateMirrorTheme
+      summary: Keep the mirror light or dark palette in sync with the mobile app
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MirrorThemeRequest'
+      responses:
+        '200':
+          description: A mirror.theme message is broadcast and replayed after reconnects.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MirrorThemeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/pairing/devices:
+    get:
+      tags: [pairing]
+      operationId: listPairingDevices
+      summary: List paired devices deduplicated by device name
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Latest paired record for each device name, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PairingDeviceList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/pairing/me:
+    get:
+      tags: [pairing]
+      operationId: getCurrentPairingDevice
+      summary: Return the paired device represented by the bearer token
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The current paired device.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PairingDevice'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/pairing/current:
+    delete:
+      tags: [pairing]
+      operationId: revokeCurrentPairing
+      summary: Revoke the bearer token and remove this pairing record
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Whether the pairing token was revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PairingRevokeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/todos:
+    get:
+      tags: [home]
+      operationId: listTodos
+      summary: List today's todos and lazily remove entries older than yesterday
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Todos for the requested local date.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TodoListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [home, websocket]
+      operationId: createTodo
+      summary: Create a todo and broadcast the updated day
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TodoCreateRequest'
+      responses:
+        '200':
+          description: Created todo; a todo.updated message is broadcast.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TodoItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/todos/{todo_id}:
+    patch:
+      tags: [home, websocket]
+      operationId: updateTodo
+      summary: Update a todo and broadcast the updated day
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: todo_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TodoUpdateRequest'
+      responses:
+        '200':
+          description: Updated todo; a todo.updated message is broadcast.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TodoItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [home, websocket]
+      operationId: deleteTodo
+      summary: Delete a todo and broadcast the updated day
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: todo_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deleted todo marker; a todo.updated message is broadcast.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, deleted]
+                properties:
+                  id:
+                    type: string
+                  deleted:
+                    const: true
+                additionalProperties: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/weekly-plans:
+    get:
+      tags: [home]
+      operationId: listWeeklyPlans
+      summary: List the recurring Monday-to-Sunday training plan
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Weekly recurring plan items.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WeeklyPlanListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags: [home, websocket]
+      operationId: replaceWeeklyPlans
+      summary: Atomically replace the full weekly plan draft
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WeeklyPlanBatchUpdate'
+      responses:
+        '200':
+          description: Replaced plan; a weekly_plan.updated message is broadcast.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WeeklyPlanListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [home, websocket]
+      operationId: createWeeklyPlanItem
+      summary: Create one weekly plan item
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WeeklyPlanInput'
+      responses:
+        '200':
+          description: Created weekly plan item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WeeklyPlanItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/weekly-plans/{plan_id}:
+    patch:
+      tags: [home, websocket]
+      operationId: updateWeeklyPlanItem
+      summary: Update one weekly plan item
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: plan_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WeeklyPlanInput'
+      responses:
+        '200':
+          description: Updated weekly plan item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WeeklyPlanItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [home, websocket]
+      operationId: deleteWeeklyPlanItem
+      summary: Delete one weekly plan item
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: plan_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deleted weekly plan marker.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, deleted]
+                properties:
+                  id:
+                    type: string
+                  deleted:
+                    const: true
+                additionalProperties: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/v1/sessions:
     post:
@@ -937,7 +1788,12 @@ paths:
     post:
       tags: [sessions]
       operationId: cancelSession
-      summary: Cancel a non-terminal session
+      summary: Cancel session startup without retaining a record
+      description: |-
+        Only valid while the session is created or preparing. Core stops the
+        local Live Engine if needed, removes the session directory and database
+        record, then broadcasts session.deleted. Cancelled startup attempts do
+        not appear in history or trend summaries.
       security:
         - bearerAuth: []
       parameters:
@@ -945,7 +1801,7 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200':
-          description: Session cancelled.
+          description: Startup cancelled; no history or trend record is retained.
           content:
             application/json:
               schema:
@@ -1266,7 +2122,7 @@ paths:
       security:
         - bearerAuth: []
       x-websocket: true
-      x-message-types: [session.snapshot, session.state, session.deleted, live.metrics, rep.completed, form.alert, report.progress, report.ready, error]
+      x-message-types: [session.snapshot, session.state, session.deleted, live.metrics, rep.completed, form.alert, report.progress, report.ready, mirror.layout, todo.updated, weekly_plan.updated, error]
       responses:
         '101':
           description: WebSocket upgrade accepted.
@@ -1278,7 +2134,7 @@ paths:
       summary: Mirror control WebSocket
       security: []
       x-websocket: true
-      x-message-types: [session.start, session.config, session.dismissed, session.deleted, session.state, live.metrics, form.alert, report.progress, report.ready, mirror.state, error]
+      x-message-types: [session.start, session.config, session.dismissed, session.deleted, session.state, live.metrics, form.alert, report.progress, report.ready, mirror.state, mirror.layout, mirror.page, mirror.theme, pairing.state, todo.updated, weekly_plan.updated, error]
       parameters:
         - $ref: '#/components/parameters/MirrorWebSocketProtocols'
       responses:

@@ -15,18 +15,12 @@ class HomePage extends StatefulWidget {
     super.key,
     required this.api,
     required this.refreshToken,
-    required this.isDarkMode,
-    required this.onToggleTheme,
     required this.onChanged,
-    required this.onLogout,
   });
 
   final CoreApiClient api;
   final int refreshToken;
-  final bool isDarkMode;
-  final VoidCallback onToggleTheme;
   final VoidCallback onChanged;
-  final Future<void> Function() onLogout;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -162,19 +156,6 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
                 _StatusPill(status: _liveStatus),
-                ThemeModeButton(
-                  isDarkMode: widget.isDarkMode,
-                  onPressed: widget.onToggleTheme,
-                ),
-                PopupMenuButton<String>(
-                  color: palette.elevated,
-                  onSelected: (value) {
-                    if (value == 'logout') widget.onLogout();
-                  },
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'logout', child: Text('解除配对')),
-                  ],
-                ),
               ],
             ),
             const SizedBox(height: 46),
@@ -300,10 +281,7 @@ class _HomePageState extends State<HomePage> {
                 const Spacer(),
                 Text(
                   '${_sessions.length} 条',
-                  style: TextStyle(
-                    color: palette.muted,
-                    fontSize: 12,
-                  ),
+                  style: TextStyle(color: palette.muted, fontSize: 12),
                 ),
               ],
             ),
@@ -330,10 +308,7 @@ class _TargetSelector extends StatelessWidget {
     final palette = context.vigor;
     return Row(
       children: [
-        Text(
-          '目标次数',
-          style: TextStyle(color: palette.muted, fontSize: 13),
-        ),
+        Text('目标次数', style: TextStyle(color: palette.muted, fontSize: 13)),
         const Spacer(),
         IconButton(
           onPressed: value > 1 ? () => onChanged(value - 1) : null,
@@ -369,9 +344,7 @@ class _StatusPill extends StatelessWidget {
       margin: const EdgeInsets.only(left: 8),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       decoration: BoxDecoration(
-        border: Border.all(
-          color: online ? palette.accent : palette.signal,
-        ),
+        border: Border.all(color: online ? palette.accent : palette.signal),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
@@ -424,10 +397,7 @@ class _SessionTile extends StatelessWidget {
                   ' · ${sessionStatusLabel(session.status)}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: palette.muted,
-                    fontSize: 10,
-                  ),
+                  style: TextStyle(color: palette.muted, fontSize: 10),
                 ),
               ],
             ),
@@ -459,10 +429,7 @@ class _EmptyHint extends StatelessWidget {
         border: Border.all(color: palette.line),
         borderRadius: BorderRadius.circular(10),
       ),
-      child: Text(
-        text,
-        style: TextStyle(color: palette.muted, height: 1.5),
-      ),
+      child: Text(text, style: TextStyle(color: palette.muted, height: 1.5)),
     );
   }
 }

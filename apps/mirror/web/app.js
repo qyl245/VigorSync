@@ -1,7 +1,14 @@
 const query = new URLSearchParams(window.location.search);
 const CORE_URL = (query.get("core") || "http://127.0.0.1:8011").replace(/\/$/, "");
+const THEME_COLORS = {
+  dark: "#0b0d0c",
+  light: "#f3f1e8",
+};
 
 const elements = {
+  homePanel: document.querySelector("#home-panel"),
+  homeOpenSetup: document.querySelector("#home-open-setup"),
+  setupBackHome: document.querySelector("#setup-back-home"),
   setupPanel: document.querySelector("#setup-panel"),
   trainingPanel: document.querySelector("#training-panel"),
   summaryPanel: document.querySelector("#summary-panel"),
@@ -28,6 +35,13 @@ const elements = {
   fpsLabel: document.querySelector("#fps-label"),
   alert: document.querySelector("#alert"),
   alertMessage: document.querySelector("#alert-message"),
+  confirmDialog: document.querySelector("#confirm-dialog"),
+  confirmTitle: document.querySelector("#confirm-title"),
+  confirmMessage: document.querySelector("#confirm-message"),
+  confirmSafe: document.querySelector("#confirm-safe"),
+  confirmDanger: document.querySelector("#confirm-danger"),
+  prepareButton: document.querySelector("#prepare-button"),
+  cancelButton: document.querySelector("#cancel-button"),
   pauseButton: document.querySelector("#pause-button"),
   stopButton: document.querySelector("#stop-button"),
   summaryReps: document.querySelector("#summary-reps"),
@@ -66,6 +80,7 @@ let mirrorToken = null;
 let reconnectTimer = null;
 let mirrorReconnectTimer = null;
 let alertTimer = null;
+let confirmResolver = null;
 let syncingSession = false;
 let summarySessionId = null;
 let lastMetrics = {
@@ -105,6 +120,19 @@ async function ensureBootstrap() {
   if (mirrorToken) return;
   const bootstrap = await request("/dev/v1/bootstrap");
   mirrorToken = bootstrap.mirror_token;
+}
+
+function applyMirrorTheme(mode) {
+  if (mode !== "light" && mode !== "dark") return;
+  document.documentElement.dataset.theme = mode;
+  document.documentElement.style.colorScheme = mode;
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeMeta) themeMeta.content = THEME_COLORS[mode];
+  try {
+    localStorage.setItem("vigorsync.mirror.theme", mode);
+  } catch {
+    // Theme still applies for this page when local storage is unavailable.
+  }
 }
 
 function setLoading(loading, text = "正在打开摄像头…") {
@@ -162,6 +190,28 @@ function showAlert(message) {
   }, 3200);
 }
 
+function settleConfirmation(confirmed) {
+  const resolve = confirmResolver;
+  confirmResolver = null;
+  if (elements.confirmDialog.open) elements.confirmDialog.close();
+  if (resolve) resolve(confirmed);
+}
+
+function requestConfirmation({ title, message, safeLabel, confirmLabel }) {
+  if (confirmResolver) settleConfirmation(false);
+  elements.confirmTitle.textContent = title;
+  elements.confirmMessage.textContent = message;
+  elements.confirmSafe.textContent = safeLabel;
+  elements.confirmDanger.textContent = confirmLabel;
+  elements.confirmDanger.disabled = false;
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+    elements.confirmDialog.showModal();
+    elements.confirmSafe.focus();
+  });
+}
+
+
 function setConnection(text, online = false) {
   elements.connectionBadge.textContent = text;
   elements.connectionBadge.classList.toggle("online", online);
@@ -193,6 +243,35 @@ function applyDraftConfig(config) {
 
 function isLiveStatus(status) {
   return ["created", "preparing", "active", "paused"].includes(status);
+}
+
+function showHome() {
+  elements.homePanel.hidden = false;
+  elements.setupPanel.hidden = true;
+  elements.summaryPanel.hidden = true;
+  elements.trainingPanel.hidden = true;
+}
+
+function showSetup() {
+  elements.homePanel.hidden = true;
+  elements.setupPanel.hidden = false;
+  elements.summaryPanel.hidden = true;
+  elements.trainingPanel.hidden = true;
+}
+
+function handleMirrorPage(page) {
+  if (currentSession && isLiveStatus(currentSession.status)) return;
+  if (page === "training") {
+    showSetup();
+  } else {
+    showHome();
+  }
+}
+
+function dispatchHomeEvent(type, payload) {
+  window.dispatchEvent(
+    new CustomEvent(`vigorsync:${type}`, { detail: payload }),
+  );
 }
 
 function resetMetrics() {
@@ -285,6 +364,23 @@ function connectMirrorSocket() {
 }
 
 function handleMirrorMessage(message) {
+  if (message.type === "mirror.theme") {
+    applyMirrorTheme(message.payload?.mode);
+    return;
+  }
+  if (message.type === "mirror.page") {
+    handleMirrorPage(message.payload?.page);
+    return;
+  }
+  if (
+    message.type === "mirror.layout" ||
+    message.type === "pairing.state" ||
+    message.type === "todo.updated" ||
+    message.type === "weekly_plan.updated"
+  ) {
+    dispatchHomeEvent(message.type, message.payload);
+    return;
+  }
   if (message.type === "session.config") {
     applyDraftConfig(message.payload);
     return;
@@ -337,11 +433,22 @@ function handleMirrorMessage(message) {
   }
 }
 
+function updateTrainingControls() {
+  const status = currentSession?.status;
+  const preparing = ["created", "preparing"].includes(status);
+  const training = ["active", "paused"].includes(status);
+  elements.prepareButton.hidden = !preparing;
+  elements.cancelButton.hidden = !preparing;
+  elements.pauseButton.hidden = !training;
+  elements.stopButton.hidden = !training;
+}
+
 function handleSessionState(sessionId, payload) {
   if (!currentSession || currentSession.session_id !== sessionId) return;
   const status = payload?.status;
   if (!status) return;
   currentSession = { ...currentSession, status };
+  updateTrainingControls();
   if (status === "paused") {
     elements.pauseButton.textContent = "继续";
     elements.phaseLabel.textContent = "已暂停";
@@ -353,7 +460,9 @@ function handleSessionState(sessionId, payload) {
     elements.analysisStatusText.textContent = "分析失败";
     elements.analysisProgressBar.style.width = "0%";
     showAlert("训练或离线分析发生错误，请查看历史记录。");
-  } else if (["analyzing", "completed", "cancelled"].includes(status)) {
+  } else if (status === "cancelled") {
+    restart();
+  } else if (["analyzing", "completed"].includes(status)) {
     showSummary(sessionId).catch((error) => {
       setConnection("会话已结束");
       showAlert(error.message);
@@ -397,6 +506,7 @@ async function waitUntilReady(sessionId) {
     const session = await request(`/dev/v1/sessions/${sessionId}`);
     if (currentSession?.session_id !== sessionId) return;
     currentSession = { ...currentSession, ...session };
+    updateTrainingControls();
     if (session.status === "active") {
       setConnection("实时连接", true);
       return;
@@ -426,6 +536,7 @@ async function attachSession(session, { waitForReady = true } = {}) {
     currentSession = { ...currentSession, ...session };
   }
 
+  elements.homePanel.hidden = true;
   elements.setupPanel.hidden = true;
   elements.summaryPanel.hidden = true;
   elements.trainingPanel.hidden = false;
@@ -446,6 +557,7 @@ async function attachSession(session, { waitForReady = true } = {}) {
   }
   elements.pauseButton.textContent =
     currentSession.status === "paused" ? "继续" : "暂停";
+  updateTrainingControls();
   elements.repCluster.classList.remove("target-hit");
 
   if (elements.stream.dataset.sessionId !== currentSession.session_id) {
@@ -530,9 +642,15 @@ async function startSession(event) {
 }
 
 async function togglePause() {
-  if (!currentSession) return;
-  const paused = elements.pauseButton.textContent === "继续";
+  if (
+    !currentSession ||
+    !["active", "paused"].includes(currentSession.status)
+  ) {
+    return;
+  }
+  const paused = currentSession.status === "paused";
   const action = paused ? "resume" : "pause";
+  elements.pauseButton.disabled = true;
   try {
     const session = await request(
       `/dev/v1/sessions/${currentSession.session_id}/${action}`,
@@ -540,21 +658,79 @@ async function togglePause() {
     );
     currentSession = { ...currentSession, ...session };
     elements.pauseButton.textContent = paused ? "暂停" : "继续";
+    updateTrainingControls();
     updateMetrics(session.metrics);
   } catch (error) {
     showAlert(error.message);
+  } finally {
+    elements.pauseButton.disabled = false;
+  }
+}
+
+async function cancelStart() {
+  if (
+    !currentSession ||
+    !["created", "preparing"].includes(currentSession.status)
+  ) {
+    return;
+  }
+  const sessionId = currentSession.session_id;
+  const confirmed = await requestConfirmation({
+    title: "取消本次启动？",
+    message: "Live Engine 将停止，本次不会保存，历史与趋势也不会新增。",
+    safeLabel: "继续准备",
+    confirmLabel: "取消启动",
+  });
+  if (!confirmed || !currentSession || currentSession.session_id !== sessionId) {
+    return;
+  }
+  if (!["created", "preparing"].includes(currentSession.status)) {
+    showAlert("训练已经开始，请使用结束并保存。");
+    return;
+  }
+  elements.cancelButton.disabled = true;
+  elements.cancelButton.textContent = "正在取消…";
+  try {
+    await request(`/dev/v1/sessions/${sessionId}/cancel`, {
+      method: "POST",
+      body: "{}",
+    });
+    restart();
+    showHome();
+  } catch (error) {
+    showAlert(error.message);
+  } finally {
+    elements.cancelButton.disabled = false;
+    elements.cancelButton.textContent = "取消启动";
   }
 }
 
 async function stopSession() {
-  if (!currentSession) return;
+  if (
+    !currentSession ||
+    !["active", "paused"].includes(currentSession.status)
+  ) {
+    return;
+  }
+  const sessionId = currentSession.session_id;
+  const confirmed = await requestConfirmation({
+    title: "结束并保存本次训练？",
+    message:
+      "将停止计数，保存视频、关键点和训练摘要，并开始离线分析。确认期间训练仍在继续。",
+    safeLabel: "继续训练",
+    confirmLabel: "结束并保存",
+  });
+  if (!confirmed || !currentSession || currentSession.session_id !== sessionId) {
+    return;
+  }
+  if (!["active", "paused"].includes(currentSession.status)) return;
   elements.stopButton.disabled = true;
   elements.stopButton.textContent = "正在结束…";
   try {
-    const result = await request(
-      `/dev/v1/sessions/${currentSession.session_id}/stop`,
-      { method: "POST", body: "{}" },
-    );
+    const result = await request(`/dev/v1/sessions/${sessionId}/stop`, {
+      method: "POST",
+      body: "{}",
+    });
     await showSummary(result.session_id, result);
   } catch (error) {
     showAlert(error.message);
@@ -578,6 +754,7 @@ async function showSummary(sessionId, detail = null) {
   closeLiveSocket();
   elements.stream.removeAttribute("src");
   delete elements.stream.dataset.sessionId;
+  elements.homePanel.hidden = true;
   elements.trainingPanel.hidden = true;
   elements.setupPanel.hidden = true;
   elements.summaryPanel.hidden = false;
@@ -612,14 +789,15 @@ async function showSummary(sessionId, detail = null) {
 }
 
 function restart() {
+  if (confirmResolver) settleConfirmation(false);
   closeLiveSocket();
   currentSession = null;
+  updateTrainingControls();
   summarySessionId = null;
   resetMetrics();
   elements.stream.removeAttribute("src");
   delete elements.stream.dataset.sessionId;
-  elements.summaryPanel.hidden = true;
-  elements.setupPanel.hidden = false;
+  showHome();
   elements.setupError.textContent = "";
   elements.pauseButton.textContent = "暂停";
   elements.openReportButton.hidden = true;
@@ -627,8 +805,23 @@ function restart() {
 
 elements.startForm.addEventListener("submit", startSession);
 elements.pauseButton.addEventListener("click", togglePause);
+elements.cancelButton.addEventListener("click", cancelStart);
+elements.confirmSafe.addEventListener("click", () => settleConfirmation(false));
+elements.confirmDanger.addEventListener("click", () => settleConfirmation(true));
+elements.confirmDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  settleConfirmation(false);
+});
+elements.confirmDialog.addEventListener("click", (event) => {
+  if (event.target === elements.confirmDialog) settleConfirmation(false);
+});
 elements.stopButton.addEventListener("click", stopSession);
-elements.restartButton.addEventListener("click", restart);
+elements.restartButton.addEventListener("click", () => {
+  restart();
+  showSetup();
+});
+elements.homeOpenSetup.addEventListener("click", showSetup);
+elements.setupBackHome.addEventListener("click", showHome);
 
 async function initializeMirror() {
   try {

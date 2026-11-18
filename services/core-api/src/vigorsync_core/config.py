@@ -24,6 +24,11 @@ class Settings:
     offline_data_root: Path | None = None
     mirror_token: str = "vigorsync-mirror-dev"
     pairing_code: str = "482913"
+    weather_latitude: float = 31.2304
+    weather_longitude: float = 121.4737
+    discovery_enabled: bool = True
+    discovery_port: int = 8765
+    mirror_name: str = "VigorSync Mirror"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -72,6 +77,19 @@ class Settings:
                 "vigorsync-mirror-dev",
             ),
             pairing_code=os.getenv("VIGORSYNC_PAIRING_CODE", "482913"),
+            weather_latitude=float(
+                os.getenv("VIGORSYNC_WEATHER_LATITUDE", "31.2304")
+            ),
+            weather_longitude=float(
+                os.getenv("VIGORSYNC_WEATHER_LONGITUDE", "121.4737")
+            ),
+            discovery_enabled=os.getenv(
+                "VIGORYSYNC_DISCOVERY_ENABLED",
+                "1",
+            ).strip().lower()
+            not in {"0", "false", "no", "off"},
+            discovery_port=int(os.getenv("VIGORYSYNC_DISCOVERY_PORT", "8765")),
+            mirror_name=os.getenv("VIGORYSYNC_MIRROR_NAME", "VigorSync Mirror"),
         )
 
     def ensure_directories(self) -> None:

@@ -12,11 +12,13 @@ class PairingPage extends StatefulWidget {
     required this.onPaired,
     required this.isDarkMode,
     required this.onToggleTheme,
+    this.initialMessage,
   });
 
   final Future<void> Function(CoreCredentials credentials) onPaired;
   final bool isDarkMode;
   final VoidCallback onToggleTheme;
+  final String? initialMessage;
 
   @override
   State<PairingPage> createState() => _PairingPageState();
@@ -36,6 +38,7 @@ class _PairingPageState extends State<PairingPage> {
     _urlController = TextEditingController(text: 'http://10.0.2.2:8011');
     _codeController = TextEditingController();
     _deviceController = TextEditingController(text: 'VigorSync Android');
+    _error = widget.initialMessage;
   }
 
   @override
@@ -174,10 +177,7 @@ class _PairingPageState extends State<PairingPage> {
                   ),
                   if (_error != null) ...[
                     const SizedBox(height: 16),
-                    Text(
-                      _error!,
-                      style: TextStyle(color: palette.signal),
-                    ),
+                    Text(_error!, style: TextStyle(color: palette.signal)),
                   ],
                   const SizedBox(height: 34),
                   Text(

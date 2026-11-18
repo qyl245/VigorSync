@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import shutil
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import httpx
 from fastapi import (
     Depends,
     FastAPI,
@@ -24,11 +27,113 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import Settings
-from .db import Database
+from .db import Database, utc_now
+from .discovery import DiscoveryResponder
 from .events import EventHub
 from .live_client import LiveClient, LiveEngineError
 from .offline_client import OfflineClient, OfflineWorkerError
 from .state import InvalidTransition, command_target, internal_target
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+class MirrorModuleItem(BaseModel):
+    id: Literal["weather", "trend", "todo", "weekly_plan"]
+    size: Literal["1x1", "1x2"]
+    column: Literal["left", "right"]
+    order: int = Field(ge=0, le=3)
+
+
+class MirrorLayoutUpdate(BaseModel):
+    modules: list[MirrorModuleItem] = Field(max_length=8)
+
+
+class MirrorFocusBody(BaseModel):
+    page: Literal["home", "training", "history", "profile"]
+
+
+class MirrorThemeBody(BaseModel):
+    mode: Literal["light", "dark"]
+
+
+ViewName = Literal[
+    "front",
+    "rear",
+    "oblique_left",
+    "oblique_right",
+    "side_left",
+    "side_right",
+    "unknown",
+]
+
+
+class TodoCreateBody(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    todo_date: date | None = None
+    sort_order: int | None = Field(default=None, ge=0, le=1000)
+
+
+class TodoUpdateBody(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    completed: bool | None = None
+    sort_order: int | None = Field(default=None, ge=0, le=1000)
+
+
+class WeeklyPlanBody(BaseModel):
+    id: str | None = None
+    weekday: int = Field(ge=1, le=7)
+    exercise: Literal["squat", "pushup"]
+    view: ViewName | None = None
+    sets: int | None = Field(default=None, ge=1, le=20)
+    target_reps: int = Field(ge=1, le=500)
+    note: str | None = Field(default=None, max_length=300)
+    sort_order: int | None = Field(default=None, ge=0, le=1000)
+
+
+class WeeklyPlanBatchBody(BaseModel):
+    items: list[WeeklyPlanBody] = Field(max_length=50)
+
+
+WEATHER_CODE_TEXT = {
+    0: "晴",
+    1: "大致晴朗",
+    2: "局部多云",
+    3: "阴",
+    45: "雾",
+    48: "雾凇",
+    51: "毛毛雨",
+    53: "毛毛雨",
+    55: "毛毛雨",
+    56: "冻毛毛雨",
+    57: "冻毛毛雨",
+    61: "小雨",
+    63: "中雨",
+    65: "大雨",
+    66: "冻雨",
+    67: "冻雨",
+    71: "小雪",
+    73: "中雪",
+    75: "大雪",
+    77: "雪粒",
+    80: "阵雨",
+    81: "阵雨",
+    82: "强阵雨",
+    85: "阵雪",
+    86: "阵雪",
+    95: "雷暴",
+    96: "雷阵雨",
+    99: "雷阵雨",
+}
+
+WEATHER_TTL_S = 1800.0
+
+DEFAULT_MIRROR_MODULES = [
+    {"id": "weather", "size": "1x2", "column": "left", "order": 0},
+    {"id": "todo", "size": "1x2", "column": "left", "order": 1},
+    {"id": "trend", "size": "1x2", "column": "right", "order": 0},
+    {"id": "weekly_plan", "size": "1x2", "column": "right", "order": 1},
+]
 
 
 class SessionCreate(BaseModel):
@@ -128,9 +233,137 @@ def create_app(
         "view": "side_left",
         "target_reps": 12,
     }
+    client_connections = {"count": 0}
+    client_sockets: dict[str, set[WebSocket]] = {}
+    weather_cache: dict[str, Any] = {}
+
+    async def publish_pairing_state() -> None:
+        await hub.publish(
+            "mirror",
+            {
+                "type": "pairing.state",
+                "version": "v1",
+                "payload": {"connected": client_connections["count"] > 0},
+            },
+        )
+
+    async def disconnect_token_clients(token: str) -> None:
+        sockets = tuple(client_sockets.pop(token, ()))
+        if sockets:
+            client_connections["count"] = max(
+                0,
+                client_connections["count"] - len(sockets),
+            )
+        await publish_pairing_state()
+        for socket in sockets:
+            try:
+                await socket.close(code=4401)
+            except RuntimeError:
+                # The websocket task may already be finishing its disconnect path.
+                pass
+
+    def current_mirror_layout() -> dict[str, Any]:
+        layout = database.get_mirror_layout()
+        if layout is not None:
+            return layout
+        return {
+            "version": 2,
+            "modules": [dict(module) for module in DEFAULT_MIRROR_MODULES],
+            "updated_at": utc_now(),
+        }
+
+    def current_mirror_theme() -> dict[str, str]:
+        mode = database.get_setting("mirror.theme", "dark")
+        if mode not in {"light", "dark"}:
+            mode = "dark"
+        return {"mode": mode}
+
+    async def publish_todos(todo_date: str) -> dict[str, Any]:
+        payload = database.list_todos(todo_date)
+        message = {
+            "type": "todo.updated",
+            "version": "v1",
+            "payload": payload,
+        }
+        await hub.publish("client", message)
+        await hub.publish("mirror", message)
+        return payload
+
+    async def publish_weekly_plans() -> dict[str, Any]:
+        payload = database.list_weekly_plans()
+        message = {
+            "type": "weekly_plan.updated",
+            "version": "v1",
+            "payload": payload,
+        }
+        await hub.publish("client", message)
+        await hub.publish("mirror", message)
+        return payload
+
+    async def weather_snapshot() -> dict[str, Any]:
+        now = asyncio.get_running_loop().time()
+        cached = weather_cache.get("payload")
+        cached_at = float(weather_cache.get("fetched_monotonic") or 0.0)
+        if cached is not None and now - cached_at < WEATHER_TTL_S:
+            return {**cached, "cached": True}
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={settings.weather_latitude}"
+            f"&longitude={settings.weather_longitude}"
+            "&current=temperature_2m,relative_humidity_2m,weather_code"
+            "&daily=temperature_2m_max,temperature_2m_min"
+            "&forecast_days=1&timezone=auto"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+            current = data.get("current") or {}
+            daily = data.get("daily") or {}
+            code = current.get("weather_code")
+            payload = {
+                "status": "ok",
+                "temperature_c": current.get("temperature_2m"),
+                "humidity": current.get("relative_humidity_2m"),
+                "weather_code": code,
+                "weather_text": WEATHER_CODE_TEXT.get(code, "未知"),
+                "temp_min_c": (daily.get("temperature_2m_min") or [None])[0],
+                "temp_max_c": (daily.get("temperature_2m_max") or [None])[0],
+                "fetched_at": utc_now(),
+                "cached": False,
+            }
+            weather_cache["payload"] = payload
+            weather_cache["fetched_monotonic"] = now
+            return payload
+        except Exception:
+            if cached is not None:
+                return {**cached, "cached": True}
+            return {
+                "status": "unavailable",
+                "fetched_at": utc_now(),
+                "cached": False,
+            }
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        discovery_responder: DiscoveryResponder | None = None
+        if settings.discovery_enabled:
+            discovery_responder = DiscoveryResponder(
+                port=settings.discovery_port,
+                core_port=settings.port,
+                device_name=settings.mirror_name,
+            )
+            try:
+                discovery_responder.start()
+            except OSError:
+                LOGGER.warning(
+                    "Unable to start UDP discovery on port %s",
+                    settings.discovery_port,
+                    exc_info=True,
+                )
+                discovery_responder.stop()
+                discovery_responder = None
         try:
             for record in database.list_sessions(status="analyzing", limit=100):
                 if record.get("job_id"):
@@ -149,6 +382,8 @@ def create_app(
                 await live.close()
             if owns_offline_client:
                 await offline.close()
+            if discovery_responder is not None:
+                discovery_responder.stop()
 
     app = FastAPI(title="VigorSync Core", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -217,6 +452,56 @@ def create_app(
             return database.get_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
+
+    def purge_session(session_id: str, record: dict[str, Any]) -> None:
+        session_root = settings.session_root.resolve()
+        candidate = session_root / session_id
+        resolved = candidate.resolve()
+        if (
+            candidate.name != session_id
+            or candidate.is_symlink()
+            or resolved.parent != session_root
+        ):
+            raise HTTPException(status_code=400, detail="invalid_session_path")
+
+        staged: Path | None = None
+        if candidate.exists() or candidate.is_symlink():
+            staged = session_root / (
+                f".deleting-{session_id}-{secrets.token_hex(4)}"
+            )
+            candidate.replace(staged)
+        try:
+            database.delete_session(session_id)
+        except Exception:
+            if staged is not None and staged.exists():
+                staged.replace(candidate)
+            raise
+        if staged is not None:
+            shutil.rmtree(staged)
+
+        job_id = record.get("job_id")
+        if job_id and settings.offline_data_root is not None:
+            jobs_root = (settings.offline_data_root / "jobs").resolve()
+            offline_job = (jobs_root / job_id).resolve()
+            try:
+                offline_job.relative_to(jobs_root)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid_offline_job_path",
+                ) from exc
+            if offline_job.is_dir():
+                shutil.rmtree(offline_job)
+
+    async def publish_session_deleted(session_id: str) -> None:
+        payload = {
+            "type": "session.deleted",
+            "version": "v1",
+            "session_id": session_id,
+            "payload": {},
+        }
+        await hub.publish("client", payload)
+        await hub.publish("mirror", payload)
 
     async def append_and_publish(
         session_id: str,
@@ -539,12 +824,19 @@ def create_app(
             return await start_session(session_id)
         target = command_target(record["status"], command)
         if command == "cancel":
-            if record["status"] in {"active", "paused", "preparing"}:
+            if record["status"] == "preparing":
                 try:
                     await live.stop(session_id)
                 except LiveEngineError:
                     pass
-            return await set_session_status(session_id, target, record["status"])
+            response = {
+                **record,
+                "status": "cancelled",
+                "ended_at": record["ended_at"] or utc_now(),
+            }
+            purge_session(session_id, record)
+            await publish_session_deleted(session_id)
+            return response
         if command == "pause":
             await live.pause(session_id)
         elif command == "resume":
@@ -605,6 +897,203 @@ def create_app(
             "core_url": f"http://127.0.0.1:{settings.port}",
             "expires_at": None,
         }
+
+    @app.get("/api/v1/weather", dependencies=[Depends(require_token)])
+    async def get_weather() -> dict[str, Any]:
+        return await weather_snapshot()
+
+    @app.get("/api/v1/stats/trend", dependencies=[Depends(require_token)])
+    async def get_trend(
+        days: int = Query(default=7, ge=1, le=31),
+    ) -> dict[str, Any]:
+        return {"days": database.daily_trend(days)}
+
+    @app.get("/api/v1/mirror/layout", dependencies=[Depends(require_token)])
+    async def get_mirror_layout() -> dict[str, Any]:
+        return current_mirror_layout()
+
+    @app.put("/api/v1/mirror/layout", dependencies=[Depends(require_token)])
+    async def update_mirror_layout(
+        payload: MirrorLayoutUpdate,
+    ) -> dict[str, Any]:
+        modules = [module.model_dump() for module in payload.modules]
+        layout = database.set_mirror_layout(modules)
+        message = {
+            "type": "mirror.layout",
+            "version": "v1",
+            "payload": layout,
+        }
+        await hub.publish("mirror", message)
+        await hub.publish("client", message)
+        return layout
+
+    @app.get("/api/v1/todos", dependencies=[Depends(require_token)])
+    async def get_todos(day: date | None = Query(default=None)) -> dict[str, Any]:
+        return database.list_todos(day.isoformat() if day else None)
+
+    @app.post("/api/v1/todos", dependencies=[Depends(require_token)])
+    async def create_todo(payload: TodoCreateBody) -> dict[str, Any]:
+        title = payload.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="todo_title_required")
+        try:
+            todo = database.create_todo(
+                todo_id=f"t_{secrets.token_hex(8)}",
+                title=title,
+                todo_date=(
+                    payload.todo_date.isoformat()
+                    if payload.todo_date
+                    else None
+                ),
+                sort_order=payload.sort_order,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await publish_todos(todo["todo_date"])
+        return todo
+
+    @app.patch("/api/v1/todos/{todo_id}", dependencies=[Depends(require_token)])
+    async def update_todo(
+        todo_id: str,
+        payload: TodoUpdateBody,
+    ) -> dict[str, Any]:
+        changes = {
+            key: value
+            for key, value in payload.model_dump(exclude_unset=True).items()
+            if value is not None
+        }
+        if not changes:
+            raise HTTPException(status_code=400, detail="no_todo_changes")
+        if "title" in changes:
+            changes["title"] = str(changes["title"]).strip()
+            if not changes["title"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="todo_title_required",
+                )
+        try:
+            todo = database.update_todo(todo_id, **changes)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="todo_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await publish_todos(todo["todo_date"])
+        return todo
+
+    @app.delete("/api/v1/todos/{todo_id}", dependencies=[Depends(require_token)])
+    async def delete_todo(todo_id: str) -> dict[str, Any]:
+        try:
+            todo = database.delete_todo(todo_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="todo_not_found") from exc
+        await publish_todos(todo["todo_date"])
+        return {"id": todo_id, "deleted": True}
+
+    @app.get("/api/v1/weekly-plans", dependencies=[Depends(require_token)])
+    async def get_weekly_plans() -> dict[str, Any]:
+        return database.list_weekly_plans()
+
+    @app.put("/api/v1/weekly-plans", dependencies=[Depends(require_token)])
+    async def replace_weekly_plans(
+        payload: WeeklyPlanBatchBody,
+    ) -> dict[str, Any]:
+        items = [item.model_dump(exclude_none=True) for item in payload.items]
+        database.replace_weekly_plans(items)
+        return await publish_weekly_plans()
+
+    @app.post("/api/v1/weekly-plans", dependencies=[Depends(require_token)])
+    async def create_weekly_plan(payload: WeeklyPlanBody) -> dict[str, Any]:
+        plan = database.create_weekly_plan(
+            plan_id=payload.id or f"wp_{secrets.token_hex(8)}",
+            weekday=payload.weekday,
+            exercise=payload.exercise,
+            view=payload.view,
+            sets=payload.sets,
+            target_reps=payload.target_reps,
+            note=payload.note,
+            sort_order=payload.sort_order,
+        )
+        await publish_weekly_plans()
+        return plan
+
+    @app.patch(
+        "/api/v1/weekly-plans/{plan_id}",
+        dependencies=[Depends(require_token)],
+    )
+    async def update_weekly_plan(
+        plan_id: str,
+        payload: WeeklyPlanBody,
+    ) -> dict[str, Any]:
+        updates = payload.model_dump(exclude={"id", "sort_order"})
+        if payload.sort_order is not None:
+            updates["sort_order"] = payload.sort_order
+        try:
+            plan = database.update_weekly_plan(plan_id, **updates)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="weekly_plan_not_found") from exc
+        await publish_weekly_plans()
+        return plan
+
+    @app.delete(
+        "/api/v1/weekly-plans/{plan_id}",
+        dependencies=[Depends(require_token)],
+    )
+    async def delete_weekly_plan(plan_id: str) -> dict[str, Any]:
+        try:
+            database.delete_weekly_plan(plan_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="weekly_plan_not_found") from exc
+        await publish_weekly_plans()
+        return {"id": plan_id, "deleted": True}
+
+    @app.post("/api/v1/control/focus", dependencies=[Depends(require_token)])
+    async def update_mirror_focus(payload: MirrorFocusBody) -> dict[str, Any]:
+        await hub.publish(
+            "mirror",
+            {
+                "type": "mirror.page",
+                "version": "v1",
+                "payload": {"page": payload.page},
+            },
+        )
+        return {"page": payload.page, "delivered": True}
+
+    @app.post("/api/v1/control/theme", dependencies=[Depends(require_token)])
+    async def update_mirror_theme(payload: MirrorThemeBody) -> dict[str, Any]:
+        database.set_setting("mirror.theme", payload.mode)
+        await hub.publish(
+            "mirror",
+            {
+                "type": "mirror.theme",
+                "version": "v1",
+                "payload": {"mode": payload.mode},
+            },
+        )
+        return {"mode": payload.mode, "delivered": True}
+
+    @app.get("/api/v1/pairing/devices", dependencies=[Depends(require_token)])
+    async def list_pairing_devices() -> dict[str, Any]:
+        return {"items": database.list_paired_devices()}
+
+    @app.get("/api/v1/pairing/me", dependencies=[Depends(require_token)])
+    async def current_pairing_device(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, Any]:
+        token = (authorization or "")[7:].strip()
+        device = database.get_device_for_token(token)
+        if device is None:
+            raise HTTPException(status_code=401, detail="invalid_pairing_token")
+        return device
+
+    @app.delete("/api/v1/pairing/current", dependencies=[Depends(require_token)])
+    async def revoke_current_pairing(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, bool]:
+        token = (authorization or "")[7:].strip()
+        revoked = database.revoke_token(token)
+        if revoked:
+            await disconnect_token_clients(token)
+        return {"revoked": revoked}
 
     @app.post(
         "/api/v1/control/config",
@@ -882,53 +1371,8 @@ def create_app(
         if in_progress:
             raise HTTPException(status_code=409, detail="session_in_progress")
 
-        session_root = settings.session_root.resolve()
-        candidate = session_root / session_id
-        resolved = candidate.resolve()
-        if (
-            candidate.name != session_id
-            or candidate.is_symlink()
-            or resolved.parent != session_root
-        ):
-            raise HTTPException(status_code=400, detail="invalid_session_path")
-
-        staged: Path | None = None
-        if candidate.exists() or candidate.is_symlink():
-            staged = session_root / (
-                f".deleting-{session_id}-{secrets.token_hex(4)}"
-            )
-            candidate.replace(staged)
-        try:
-            database.delete_session(session_id)
-        except Exception:
-            if staged is not None and staged.exists():
-                staged.replace(candidate)
-            raise
-        if staged is not None:
-            shutil.rmtree(staged)
-
-        job_id = record.get("job_id")
-        if job_id and settings.offline_data_root is not None:
-            jobs_root = (settings.offline_data_root / "jobs").resolve()
-            offline_job = (jobs_root / job_id).resolve()
-            try:
-                offline_job.relative_to(jobs_root)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail="invalid_offline_job_path",
-                ) from exc
-            if offline_job.is_dir():
-                shutil.rmtree(offline_job)
-
-        payload = {
-            "type": "session.deleted",
-            "version": "v1",
-            "session_id": session_id,
-            "payload": {},
-        }
-        await hub.publish("client", payload)
-        await hub.publish("mirror", payload)
+        purge_session(session_id, record)
+        await publish_session_deleted(session_id)
         return {"session_id": session_id, "deleted": True}
 
     @app.post(
@@ -1054,6 +1498,39 @@ def create_app(
         records = database.list_sessions(limit=50)
         return {"items": [public_session(record) for record in records]}
 
+    @app.get("/dev/v1/weather")
+    async def dev_weather(request: Request) -> dict[str, Any]:
+        require_loopback(request)
+        return await weather_snapshot()
+
+    @app.get("/dev/v1/trend")
+    async def dev_trend(request: Request) -> dict[str, Any]:
+        require_loopback(request)
+        return {"days": database.daily_trend(7)}
+
+    @app.get("/dev/v1/todos")
+    async def dev_todos(request: Request, day: date | None = Query(default=None)) -> dict[str, Any]:
+        require_loopback(request)
+        return database.list_todos(day.isoformat() if day else None)
+
+    @app.get("/dev/v1/weekly-plans")
+    async def dev_weekly_plans(request: Request) -> dict[str, Any]:
+        require_loopback(request)
+        return database.list_weekly_plans()
+
+    @app.get("/dev/v1/layout")
+    async def dev_layout(request: Request) -> dict[str, Any]:
+        require_loopback(request)
+        return current_mirror_layout()
+
+    @app.get("/dev/v1/pairing/status")
+    async def dev_pairing_status(request: Request) -> dict[str, Any]:
+        require_loopback(request)
+        return {
+            "connected": client_connections["count"] > 0,
+            "pairing_code": settings.pairing_code,
+        }
+
     async def dev_command(session_id: str, command: str, request: Request) -> dict[str, Any]:
         require_loopback(request)
         record = await perform_command(session_id, command)
@@ -1117,11 +1594,74 @@ def create_app(
                 "payload": public_session(latest[0]) if latest else None,
             }
         )
+        if channel == "mirror":
+            await websocket.send_json(
+                {
+                    "type": "pairing.state",
+                    "version": "v1",
+                    "payload": {
+                        "connected": client_connections["count"] > 0,
+                    },
+                }
+            )
+            await websocket.send_json(
+                {
+                    "type": "mirror.theme",
+                    "version": "v1",
+                    "payload": current_mirror_theme(),
+                }
+            )
+            await websocket.send_json(
+                {
+                    "type": "mirror.layout",
+                    "version": "v1",
+                    "payload": current_mirror_layout(),
+                }
+            )
+            await websocket.send_json(
+                {
+                    "type": "todo.updated",
+                    "version": "v1",
+                    "payload": database.list_todos(),
+                }
+            )
+            await websocket.send_json(
+                {
+                    "type": "weekly_plan.updated",
+                    "version": "v1",
+                    "payload": database.list_weekly_plans(),
+                }
+            )
+        else:
+            if not token or not database.token_is_valid(token):
+                await websocket.close(code=4401)
+                return
+            token_connections = client_sockets.setdefault(token, set())
+            token_connections.add(websocket)
+            client_connections["count"] += 1
+            if client_connections["count"] == 1:
+                await publish_pairing_state()
         try:
             async for event in hub.subscribe(channel):
                 await websocket.send_json(event)
         except WebSocketDisconnect:
             return
+        finally:
+            if channel == "client":
+                token_connections = client_sockets.get(token or "")
+                if (
+                    token_connections is not None
+                    and websocket in token_connections
+                ):
+                    token_connections.remove(websocket)
+                    if not token_connections:
+                        client_sockets.pop(token or "", None)
+                    client_connections["count"] = max(
+                        0,
+                        client_connections["count"] - 1,
+                    )
+                    if client_connections["count"] == 0:
+                        await publish_pairing_state()
 
     @app.websocket("/api/v1/ws/client")
     async def client_websocket(

@@ -31,6 +31,10 @@ class _LiveSessionPageState extends State<LiveSessionPage> {
 
   String get _exerciseName => _session.exercise == 'squat' ? '深蹲' : '俯卧撑';
   String get _jointName => _session.exercise == 'squat' ? '膝关节角' : '肘关节角';
+  bool get _isPreparing =>
+      _session.status == 'created' || _session.status == 'preparing';
+  bool get _canTogglePause =>
+      _session.status == 'active' || _session.status == 'paused';
 
   @override
   void initState() {
@@ -85,6 +89,11 @@ class _LiveSessionPageState extends State<LiveSessionPage> {
   void _handleMessage(Map<String, dynamic> message) {
     final type = message['type'];
     final payload = message['payload'];
+    if (type == 'session.deleted' &&
+        message['session_id'] == _session.sessionId) {
+      _finishCancelled();
+      return;
+    }
     if (payload is! Map<String, dynamic>) return;
     if (type == 'live.metrics') {
       setState(() => _metrics = LiveMetrics.fromJson(payload));
@@ -105,7 +114,7 @@ class _LiveSessionPageState extends State<LiveSessionPage> {
   }
 
   Future<void> _togglePause() async {
-    if (_busy) return;
+    if (_busy || !_canTogglePause) return;
     setState(() => _busy = true);
     try {
       final updated = _metrics.paused || _session.status == 'paused'
@@ -119,26 +128,143 @@ class _LiveSessionPageState extends State<LiveSessionPage> {
     }
   }
 
-  Future<void> _stop() async {
+  Future<void> _cancelStart() async {
+    if (_busy || !_isPreparing) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: context.vigor.elevated,
-        title: const Text('结束本次训练？'),
-        content: const Text('镜端会先保存视频、关键点与本次摘要。'),
+        title: const Text('取消本次启动？'),
+        content: const Text('Live Engine 将停止，本次不会保存，历史与趋势也不会新增。'),
         actions: [
           TextButton(
+            autofocus: true,
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('继续训练'),
+            child: const Text('继续准备'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: context.vigor.signal,
+              foregroundColor: context.vigor.surface,
+            ),
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('结束'),
+            child: const Text('取消启动'),
           ),
         ],
       ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true || !mounted) return;
+    if (!_isPreparing) {
+      _showError('训练已经开始，请使用结束并保存。');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await widget.api.cancelSession(_session.sessionId);
+      _finishCancelled();
+    } on CoreApiException catch (error) {
+      _showError(error.message);
+    } finally {
+      if (mounted && !_closing) setState(() => _busy = false);
+    }
+  }
+
+  void _finishCancelled() {
+    if (!mounted || _closing) return;
+    _closing = true;
+    Navigator.of(context).pop();
+  }
+
+  Widget _buildSessionActions() {
+    if (_isPreparing) {
+      return Row(
+        children: [
+          Expanded(
+            child: OutlinedButton(onPressed: null, child: const Text('准备中…')),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: OutlinedButton(
+              onPressed: _busy ? null : _cancelStart,
+              child: Text(_busy ? '正在取消…' : '取消启动'),
+            ),
+          ),
+        ],
+      );
+    }
+    if (_canTogglePause) {
+      return Row(
+        children: [
+          Expanded(
+            child: OutlinedButton(
+              onPressed: _busy ? null : _togglePause,
+              child: Text(
+                _metrics.paused || _session.status == 'paused' ? '继续训练' : '暂停',
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: context.vigor.signal,
+                foregroundColor: context.vigor.surface,
+              ),
+              onPressed: _busy ? null : _stop,
+              child: const Text('结束训练'),
+            ),
+          ),
+        ],
+      );
+    }
+    if (_session.status == 'stopping') {
+      return SizedBox(
+        width: double.infinity,
+        child: OutlinedButton(onPressed: null, child: const Text('保存中…')),
+      );
+    }
+    if (_session.status == 'analyzing') {
+      return SizedBox(
+        width: double.infinity,
+        child: OutlinedButton(onPressed: null, child: const Text('分析中…')),
+      );
+    }
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('返回主页'),
+      ),
+    );
+  }
+
+  Future<void> _stop() async {
+    if (_busy || !_canTogglePause) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: context.vigor.elevated,
+        title: const Text('结束并保存本次训练？'),
+        content: const Text('将停止计数，保存视频、关键点和训练摘要，并开始离线分析。确认期间训练仍在继续。'),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('继续训练'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: context.vigor.signal,
+              foregroundColor: context.vigor.surface,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('结束并保存'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    if (!_canTogglePause) return;
     setState(() => _busy = true);
     try {
       final updated = await widget.api.stopSession(_session.sessionId);
@@ -253,9 +379,7 @@ class _LiveSessionPageState extends State<LiveSessionPage> {
                           value: progress,
                           strokeWidth: compact ? 8 : 10,
                           backgroundColor: palette.line,
-                          color: targetHit
-                              ? palette.signal
-                              : palette.accent,
+                          color: targetHit ? palette.signal : palette.accent,
                           strokeCap: StrokeCap.square,
                         ),
                       ),
@@ -360,40 +484,11 @@ class _LiveSessionPageState extends State<LiveSessionPage> {
                 ],
                 const Spacer(),
                 Text(
-                  compact
-                      ? '原始画面仅保留在镜端'
-                      : '原始画面保留在镜端，本页仅接收低频训练状态。',
-                  style: TextStyle(
-                    color: palette.muted,
-                    fontSize: 10,
-                  ),
+                  compact ? '原始画面仅保留在镜端' : '原始画面保留在镜端，本页仅接收低频训练状态。',
+                  style: TextStyle(color: palette.muted, fontSize: 10),
                 ),
                 SizedBox(height: compact ? 8 : 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: _busy ? null : _togglePause,
-                        child: Text(
-                          _metrics.paused || _session.status == 'paused'
-                              ? '继续训练'
-                              : '暂停',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: FilledButton(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: palette.signal,
-                          foregroundColor: palette.surface,
-                        ),
-                        onPressed: _busy ? null : _stop,
-                        child: const Text('结束训练'),
-                      ),
-                    ),
-                  ],
-                ),
+                _buildSessionActions(),
               ],
             ),
           ),
@@ -414,9 +509,7 @@ class _ConnectionPill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       decoration: BoxDecoration(
-        border: Border.all(
-          color: online ? palette.accent : palette.signal,
-        ),
+        border: Border.all(color: online ? palette.accent : palette.signal),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
@@ -457,10 +550,7 @@ class _TelemetryCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
-            style: TextStyle(color: palette.muted, fontSize: 11),
-          ),
+          Text(label, style: TextStyle(color: palette.muted, fontSize: 11)),
           const SizedBox(height: 5),
           Text(
             value,
@@ -492,10 +582,7 @@ class _SmallMetric extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = context.vigor;
     return Padding(
-      padding: EdgeInsets.symmetric(
-        horizontal: 6,
-        vertical: compact ? 4 : 8,
-      ),
+      padding: EdgeInsets.symmetric(horizontal: 6, vertical: compact ? 4 : 8),
       child: Column(
         children: [
           Text(
@@ -503,10 +590,7 @@ class _SmallMetric extends StatelessWidget {
             style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 3),
-          Text(
-            label,
-            style: TextStyle(color: palette.muted, fontSize: 9),
-          ),
+          Text(label, style: TextStyle(color: palette.muted, fontSize: 9)),
         ],
       ),
     );
