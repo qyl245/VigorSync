@@ -29,6 +29,7 @@ M2 手机控制闭环和 M3 离线分析闭环已落地。
 - [实施路线与验收](docs/03-实施路线与验收.md)
 - [OpenAPI 契约](packages/contracts/openapi.yaml)
 - [会话状态机](packages/contracts/session-state-machine.json)
+- [离线 3D 姿态稳定与遮挡预测规则](docs/05-离线3D姿态稳定与遮挡预测规则.md)
 
 ## 契约校验
 
