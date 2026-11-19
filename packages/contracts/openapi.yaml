@@ -181,7 +181,7 @@ components:
           enum: [ok, unavailable, unknown]
         offline_worker:
           type: string
-          enum: [ok, unavailable, unknown]
+          enum: [ok, unavailable, unknown, disabled]
       additionalProperties: false
 
     PairingClaimRequest:
@@ -392,7 +392,8 @@ components:
         status:
           $ref: ./common.schema.json#/$defs/SessionStatus
         job_id:
-          $ref: ./common.schema.json#/$defs/JobId
+          type: [string, 'null']
+          pattern: '^job_[A-Za-z0-9_-]{6,64}$'
       additionalProperties: false
 
     LiveStartRequest:

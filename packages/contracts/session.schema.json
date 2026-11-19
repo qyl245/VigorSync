@@ -97,7 +97,11 @@
           ],
           "properties": {
             "job_id": {
-              "$ref": "https://vigorsync.local/schemas/common.schema.json#/$defs/JobId"
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^job_[A-Za-z0-9_-]{6,64}$"
             },
             "stage": {
               "type": [

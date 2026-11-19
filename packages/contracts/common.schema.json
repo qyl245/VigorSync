@@ -104,6 +104,8 @@
         "pushup_depth_insufficient",
         "pushup_body_line_break",
         "pushup_hip_sag",
+        "pushup_hip_pike",
+        "pushup_elbow_flare",
         "pushup_asymmetry",
         "pushup_tempo_inconsistent",
         "pushup_stability_low"

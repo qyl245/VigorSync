@@ -8,6 +8,10 @@
     "code": "squat_depth_insufficient",
     "severity": "medium",
     "message": "下蹲深度不够",
-    "confidence": 0.88
+    "confidence": 0.88,
+    "joints": [
+      "left_knee",
+      "right_knee"
+    ]
   }
 }

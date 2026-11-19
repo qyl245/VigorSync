@@ -12,6 +12,8 @@ from pathlib import Path
 import cv2
 
 from vigorsync_live.config import Settings
+from vigorsync_live.form_aggregator import FaultAggregator
+from vigorsync_live.form_rules import FormFaultDetector
 from vigorsync_live.overlay import draw_overlay
 from vigorsync_live.pose import PoseEstimator
 from vigorsync_live.state_machine import FormAlert, RepCompleted, StateMachine
@@ -57,6 +59,13 @@ def main() -> int:
         view=args.view,
         min_confidence=settings.min_visibility,
     )
+    detector = FormFaultDetector(
+        args.exercise,
+        args.view,
+        min_visibility=settings.min_visibility,
+    )
+    aggregator = FaultAggregator()
+    highlight_until_ms = {}
     events = []
     detected = 0
     processed = 0
@@ -74,6 +83,34 @@ def main() -> int:
                 pose.angle.angle_deg,
                 pose.angle.confidence,
             )
+            evaluation = detector.detect(
+                pose,
+                machine.display_phase(),
+                width,
+                height,
+            )
+            stable_faults = aggregator.update(
+                evaluation.candidates,
+                evaluation.evaluated_codes,
+                t_ms,
+            )
+            form_events = [
+                *(
+                    event
+                    for event in machine_events
+                    if isinstance(event, FormAlert)
+                ),
+                *(
+                    FormAlert(
+                        code=fault.code,
+                        severity=fault.severity,
+                        message=fault.message,
+                        confidence=fault.confidence,
+                        joints=fault.joints,
+                    )
+                    for fault in stable_faults
+                ),
+            ]
             for event in machine_events:
                 if isinstance(event, RepCompleted):
                     events.append(
@@ -82,13 +119,20 @@ def main() -> int:
                             **asdict(event),
                         }
                     )
-                elif isinstance(event, FormAlert):
-                    events.append(
-                        {
-                            "type": "form.alert",
-                            **asdict(event),
-                        }
-                    )
+            for event in form_events:
+                for joint in event.joints:
+                    highlight_until_ms[joint] = t_ms + 1500
+                events.append(
+                    {
+                        "type": "form.alert",
+                        **asdict(event),
+                    }
+                )
+            active_highlights = {
+                joint
+                for joint, expires_at in highlight_until_ms.items()
+                if expires_at >= t_ms
+            } | aggregator.active_joints(t_ms)
             final = draw_overlay(
                 frame,
                 pose,
@@ -98,6 +142,7 @@ def main() -> int:
                 target_reps=0,
                 fps=processed / max(time.perf_counter() - started, 1e-6),
                 paused=False,
+                highlight_joints=active_highlights,
             )
             writer.write(final)
             processed += 1

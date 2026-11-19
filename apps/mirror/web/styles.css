@@ -8,6 +8,7 @@
   --acid: #d9ff43;
   --acid-dark: #758d17;
   --signal: #ff644d;
+  --amber: #f0c56b;
   --cyan: #86e8ff;
   --display: "Bahnschrift", "Aptos Display", "Microsoft YaHei", sans-serif;
   --body: "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -614,6 +615,24 @@ input:focus {
   background: rgba(30, 17, 14, 0.88);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(16px);
+}
+
+.alert-card[data-severity="medium"] {
+  border-left-color: var(--amber);
+  background: rgba(38, 30, 13, 0.9);
+}
+
+.alert-card[data-severity="low"] {
+  border-left-color: var(--cyan);
+  background: rgba(12, 30, 34, 0.9);
+}
+
+.alert-card[data-severity="medium"] .alert-kicker {
+  color: var(--amber);
+}
+
+.alert-card[data-severity="low"] .alert-kicker {
+  color: var(--cyan);
 }
 
 .alert-card strong {

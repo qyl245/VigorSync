@@ -82,6 +82,17 @@ scripts\status_mirror.cmd
 该组脚本创建的服务和浏览器。运行日志及 PID 状态保存在 `webdata/runtime/`。
 使用 `mirror-control.ps1 -Windowed` 可改为普通窗口，`-NoBrowser` 只启动服务。
 
+测试实时纠错、暂时不运行离线分析时可使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\mirror-control.ps1 -Action stop
+powershell -ExecutionPolicy Bypass -File .\scripts\mirror-control.ps1 -Action start -DisableOfflineAnalysis
+```
+
+此模式仍保存录像、关键点、实时事件和摘要；训练结束后会话直接标记为
+`completed`，`analysis.stage` 为 `disabled`，不创建离线 job 或报告。正常启动时
+不传 `-DisableOfflineAnalysis`，离线分析默认开启。
+
 轻量桌面外壳：
 
 ```text

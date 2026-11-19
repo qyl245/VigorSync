@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, Iterable
 
 import cv2
 import numpy as np
 
 from .angle import Landmark
+from .form_rules import JOINT_IDS
 from .pose import PoseFrame
 from .state_machine import Phase
 
@@ -86,9 +87,15 @@ def draw_overlay(
     fps: float,
     paused: bool,
     show_metrics: bool = True,
+    highlight_joints: Iterable[str] = (),
 ) -> np.ndarray:
     output = frame.copy()
     height, width = output.shape[:2]
+    highlight_ids = {
+        JOINT_IDS[name]
+        for name in highlight_joints
+        if name in JOINT_IDS
+    }
     if pose.detected:
         for start_id, end_id in POSE_CONNECTIONS:
             if start_id >= len(pose.landmarks) or end_id >= len(pose.landmarks):
@@ -97,25 +104,38 @@ def draw_overlay(
             end = pose.landmarks[end_id]
             if min(start.visibility, end.visibility) < 0.4:
                 continue
+            highlighted = (
+                start_id in highlight_ids or end_id in highlight_ids
+            )
             cv2.line(
                 output,
                 (int(start.x * width), int(start.y * height)),
                 (int(end.x * width), int(end.y * height)),
-                (44, 220, 150),
-                2,
+                (70, 88, 255) if highlighted else (44, 220, 150),
+                4 if highlighted else 2,
                 cv2.LINE_AA,
             )
         for landmark in pose.landmarks:
             if landmark.visibility < 0.4:
                 continue
+            center = (int(landmark.x * width), int(landmark.y * height))
             cv2.circle(
                 output,
-                (int(landmark.x * width), int(landmark.y * height)),
+                center,
                 3,
                 (255, 210, 60),
                 -1,
                 cv2.LINE_AA,
             )
+            if landmark.id in highlight_ids:
+                cv2.circle(
+                    output,
+                    center,
+                    8,
+                    (70, 88, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
 
     if show_metrics:
         panel_width = min(280, max(220, width // 3))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -303,6 +304,82 @@ class CoreApiTests(unittest.TestCase):
             1,
             len([call for call in self.live.calls if call[0] == "start"]),
         )
+
+    def test_offline_analysis_can_be_disabled_for_live_testing(self) -> None:
+        root = Path(self.temp.name) / "disabled"
+        settings = replace(
+            self.settings,
+            db_path=root / "core.db",
+            session_root=root / "sessions",
+            offline_data_root=root / "offline",
+            offline_analysis_enabled=False,
+        )
+        live = FakeLive(root)
+        offline = FakeOffline()
+        client = TestClient(create_app(settings, live, offline))
+        claimed = client.post(
+            "/api/v1/pairing/claim",
+            json={
+                "pairing_code": "123456",
+                "device_name": "Test Phone",
+                "platform": "android",
+            },
+        ).json()
+        headers = {
+            "Authorization": f"Bearer {claimed['token']}",
+            "Idempotency-Key": "disabled-create",
+        }
+        session = client.post(
+            "/api/v1/sessions",
+            headers=headers,
+            json={"exercise": "squat", "view": "front", "target_reps": 5},
+        ).json()
+        session_id = session["session_id"]
+        client.post(
+            f"/api/v1/sessions/{session_id}/start",
+            headers={
+                **headers,
+                "Idempotency-Key": "disabled-start",
+            },
+        )
+        client.post(
+            f"/api/v1/internal/sessions/{session_id}/state",
+            json={
+                "status": "active",
+                "t_ms": 300,
+                "payload": {
+                    "exercise": "squat",
+                    "phase": "down",
+                    "reps": 4,
+                    "confidence": 0.9,
+                    "fps": 12.0,
+                    "paused": False,
+                },
+            },
+        )
+        stopped = client.post(
+            f"/api/v1/sessions/{session_id}/stop",
+            headers={
+                **headers,
+                "Idempotency-Key": "disabled-stop",
+            },
+        )
+        self.assertEqual(200, stopped.status_code, stopped.text)
+        self.assertEqual("completed", stopped.json()["status"])
+        self.assertIsNone(stopped.json()["job_id"])
+        self.assertEqual([], offline.calls)
+        detail = client.get(f"/dev/v1/sessions/{session_id}").json()
+        self.assertEqual("disabled", detail["analysis"]["stage"])
+        self.assertIsNone(detail["analysis"]["job_id"])
+        self.assertEqual(
+            "analysis_disabled",
+            detail["analysis"]["summary"]["status"],
+        )
+        self.assertIsNone(detail["report_url"])
+        self.assertEqual(8, detail["live_summary"]["reps"])
+        health = client.get("/api/v1/health").json()
+        self.assertEqual("ok", health["status"])
+        self.assertEqual("disabled", health["offline_worker"])
 
     def test_mirror_websocket_snapshot(self) -> None:
         self.create_session()

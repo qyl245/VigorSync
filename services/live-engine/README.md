@@ -18,6 +18,19 @@ $env:PYTHONPATH = "services\live-engine\src"
 .\.venv\Scripts\python.exe -m vigorsync_live
 ```
 
+## 实时纠错
+
+Live Engine 在 rep 状态机之外运行逐帧动作规则：
+
+- 深蹲正面：膝内扣。
+- 深蹲侧面：躯干前倾。
+- 俯卧撑侧面：塌腰、臀部过高。
+- 俯卧撑正面：手肘外张。
+
+规则先产生候选，再由 6 帧窗口内至少 4 帧、4 秒问题码冷却的聚合器转换为
+稳定的 `form.alert`。告警携带 `joints`，MJPEG 骨骼图会直接高亮相应关节，
+镜端同步显示分级纠正短句。低可见度帧不会记为“无问题”，避免 Pose 抖动破坏窗口。
+
 服务默认只监听 `127.0.0.1:8020`。健康检查：
 
 ```powershell

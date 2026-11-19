@@ -10,6 +10,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     project_root: Path
@@ -22,6 +29,7 @@ class Settings:
     offline_url: str = "http://127.0.0.1:8030"
     offline_internal_token: str = "vigorsync-offline-dev"
     offline_data_root: Path | None = None
+    offline_analysis_enabled: bool = True
     mirror_token: str = "vigorsync-mirror-dev"
     pairing_code: str = "482913"
 
@@ -67,6 +75,10 @@ class Settings:
                     str(webdata / "offline"),
                 )
             ).resolve(),
+            offline_analysis_enabled=_env_bool(
+                "VIGORYSYNC_OFFLINE_ANALYSIS_ENABLED",
+                True,
+            ),
             mirror_token=os.getenv(
                 "VIGORSYNC_MIRROR_TOKEN",
                 "vigorsync-mirror-dev",

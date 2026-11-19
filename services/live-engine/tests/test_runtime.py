@@ -66,7 +66,7 @@ class FakePose:
         else:
             angle = 175.0
         self.index += 1
-        landmarks = tuple(
+        landmarks = [
             Landmark(
                 id=index,
                 x=0.5,
@@ -75,11 +75,17 @@ class FakePose:
                 visibility=0.95,
             )
             for index in range(33)
-        )
+        ]
+        landmarks[11] = Landmark(11, 0.72, 0.34, 0.0, 0.95)
+        landmarks[12] = Landmark(12, 0.72, 0.36, 0.0, 0.95)
+        landmarks[23] = Landmark(23, 0.48, 0.64, 0.0, 0.95)
+        landmarks[24] = Landmark(24, 0.48, 0.66, 0.0, 0.95)
+        landmarks[27] = Landmark(27, 0.48, 0.88, 0.0, 0.95)
+        landmarks[28] = Landmark(28, 0.48, 0.88, 0.0, 0.95)
         return PoseFrame(
             detected=True,
             confidence=0.95,
-            landmarks=landmarks,
+            landmarks=tuple(landmarks),
             angle=AngleObservation(angle, 0.95, angle, angle),
         )
 
@@ -210,7 +216,15 @@ class RuntimeTests(unittest.TestCase):
                     ),
                 )
             self.assertIn("rep.completed", event_types)
+            self.assertIn("form.alert", event_types)
             self.assertIn("session.state", event_types)
+            form_alerts = [
+                json.loads(line)
+                for line in event_lines
+                if json.loads(line)["type"] == "form.alert"
+            ]
+            self.assertTrue(form_alerts)
+            self.assertTrue(form_alerts[0]["payload"]["joints"])
 
     def test_runtime_caps_inference_frequency(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

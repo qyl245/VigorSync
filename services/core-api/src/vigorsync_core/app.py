@@ -93,7 +93,7 @@ def public_session(record: dict[str, Any]) -> dict[str, Any]:
         "live_summary": record["live_summary"],
         "error": record["error"],
     }
-    if record.get("job_id") is not None:
+    if record.get("job_id") is not None or record.get("analysis_stage"):
         payload["analysis"] = {
             "job_id": record["job_id"],
             "stage": record.get("analysis_stage"),
@@ -247,6 +247,44 @@ def create_app(
             session_id,
             "session.state",
             {"status": status, "previous_status": previous},
+        )
+        return record
+
+    async def complete_without_analysis(
+        session_id: str,
+        live_summary: dict[str, Any],
+        previous_status: str,
+    ) -> dict[str, Any]:
+        from .db import utc_now
+
+        summary = {
+            "status": "analysis_disabled",
+            "rep_count": int(live_summary.get("reps") or 0),
+            "rejected_rep_count": 0,
+            "duration_s": float(live_summary.get("elapsed_s") or 0.0),
+            "quality_status": "not_analyzed",
+            "active_issue_count": 0,
+            "severity_counts": {},
+            "mean_confidence": float(live_summary.get("confidence") or 0.0),
+            "issues": [],
+        }
+        record = database.update_session(
+            session_id,
+            status="completed",
+            ended_at=utc_now(),
+            analysis_stage="disabled",
+            analysis_progress=0.0,
+            analysis_summary=summary,
+            report_ticket=None,
+            report_url=None,
+        )
+        await append_and_publish(
+            session_id,
+            "session.state",
+            {
+                "status": "completed",
+                "previous_status": previous_status,
+            },
         )
         return record
 
@@ -556,6 +594,12 @@ def create_app(
                 artifacts=result.get("artifacts"),
                 live_summary=result.get("summary"),
             )
+            if not settings.offline_analysis_enabled:
+                return await complete_without_analysis(
+                    session_id,
+                    result.get("summary") or {},
+                    record["status"],
+                )
             await set_session_status(session_id, "analyzing", record["status"])
             return await enqueue_analysis(
                 session_id,
@@ -570,14 +614,21 @@ def create_app(
             await live.health()
         except LiveEngineError:
             live_status = "unavailable"
-        offline_status = "ok"
-        try:
-            await offline.health()
-        except OfflineWorkerError:
-            offline_status = "unavailable"
+        if settings.offline_analysis_enabled:
+            offline_status = "ok"
+            try:
+                await offline.health()
+            except OfflineWorkerError:
+                offline_status = "unavailable"
+        else:
+            offline_status = "disabled"
         overall = (
             "ok"
-            if live_status == "ok" and offline_status == "ok"
+            if live_status == "ok"
+            and (
+                not settings.offline_analysis_enabled
+                or offline_status == "ok"
+            )
             else "degraded"
         )
         return {
@@ -983,6 +1034,17 @@ def create_app(
             artifacts=payload.artifacts,
             live_summary=payload.summary,
         )
+        if not settings.offline_analysis_enabled:
+            completed = await complete_without_analysis(
+                session_id,
+                payload.summary,
+                record["status"],
+            )
+            return {
+                "session_id": session_id,
+                "status": completed["status"],
+                "job_id": None,
+            }
         await set_session_status(
             session_id,
             target,

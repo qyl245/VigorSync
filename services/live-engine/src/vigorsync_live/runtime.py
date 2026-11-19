@@ -19,6 +19,8 @@ from .angle import AngleObservation, pushup_posture_valid
 from .capture import FrameSource
 from .config import Settings
 from .core_reporter import CoreReporter
+from .form_aggregator import FaultAggregator
+from .form_rules import FormFaultDetector
 from .overlay import draw_overlay, mirror_pose_for_display
 from .pose import PoseEstimator, PoseFrame
 from .state_machine import (
@@ -131,6 +133,13 @@ class SessionRuntime:
             view=request.view,
             min_confidence=settings.min_visibility,
         )
+        self._form_detector = FormFaultDetector(
+            request.exercise,
+            request.view,
+            min_visibility=settings.min_visibility,
+        )
+        self._fault_aggregator = FaultAggregator()
+        self._highlight_until_ms: dict[str, int] = {}
         self._alerts: Counter[str] = Counter()
         self._core_reporter: CoreReporter | None = None
 
@@ -256,6 +265,8 @@ class SessionRuntime:
             self._active_started_monotonic = None
             self._status = "paused"
             self._state_machine.set_paused(True)
+            self._fault_aggregator.reset()
+            self._highlight_until_ms.clear()
             self._latest_metrics["paused"] = True
             self._latest_metrics["phase"] = Phase.UNKNOWN.value
         self._emit_state("paused", "active")
@@ -534,6 +545,7 @@ class SessionRuntime:
                         fps=fps,
                         paused=self.status == "paused",
                         show_metrics=False,
+                        highlight_joints=self._active_highlights(item.t_ms),
                     )
                     self._publish_jpeg(overlay)
                 if now - last_metric_at >= 1.0 / self.settings.metric_hz:
@@ -595,7 +607,7 @@ class SessionRuntime:
             paused = self._status != "active"
         if paused:
             return
-        events = self._state_machine.update(
+        state_events = self._state_machine.update(
             captured.t_ms,
             pose.angle.angle_deg,
             pose.angle.confidence,
@@ -610,6 +622,30 @@ class SessionRuntime:
                 )
             ),
         )
+        evaluation = self._form_detector.detect(
+            pose,
+            self._state_machine.display_phase(),
+            captured.frame.shape[1],
+            captured.frame.shape[0],
+        )
+        stable_faults = self._fault_aggregator.update(
+            evaluation.candidates,
+            evaluation.evaluated_codes,
+            captured.t_ms,
+        )
+        events: list[RepCompleted | FormAlert] = [
+            *state_events,
+            *(
+                FormAlert(
+                    code=fault.code,
+                    severity=fault.severity,
+                    message=fault.message,
+                    confidence=fault.confidence,
+                    joints=fault.joints,
+                )
+                for fault in stable_faults
+            ),
+        ]
         for event in events:
             if isinstance(event, RepCompleted):
                 self._emit(
@@ -624,6 +660,7 @@ class SessionRuntime:
                     captured.t_ms,
                 )
             elif isinstance(event, FormAlert):
+                self._mark_highlights(event.joints, captured.t_ms)
                 self._alerts[event.code] += 1
                 self._emit(
                     "form.alert",
@@ -632,9 +669,30 @@ class SessionRuntime:
                         "severity": event.severity,
                         "message": event.message,
                         "confidence": event.confidence,
+                        "joints": list(event.joints),
                     },
                     captured.t_ms,
                 )
+
+    def _mark_highlights(
+        self,
+        joints: tuple[str, ...],
+        t_ms: int,
+    ) -> None:
+        expires_at = t_ms + 1500
+        for joint in joints:
+            self._highlight_until_ms[joint] = max(
+                expires_at,
+                self._highlight_until_ms.get(joint, expires_at),
+            )
+
+    def _active_highlights(self, t_ms: int) -> frozenset[str]:
+        for joint, expires_at in list(self._highlight_until_ms.items()):
+            if expires_at < t_ms:
+                self._highlight_until_ms.pop(joint, None)
+        return frozenset(
+            self._highlight_until_ms
+        ) | self._fault_aggregator.active_joints(t_ms)
 
     def _inference_fps(self) -> float:
         if len(self._processed_at) < 2:

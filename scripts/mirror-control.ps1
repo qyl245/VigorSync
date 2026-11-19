@@ -2,7 +2,8 @@ param(
     [ValidateSet("start", "stop", "status")]
     [string]$Action = "start",
     [switch]$NoBrowser,
-    [switch]$Windowed
+    [switch]$Windowed,
+    [switch]$DisableOfflineAnalysis
 )
 
 $ErrorActionPreference = "Stop"
@@ -154,6 +155,7 @@ function Show-Status {
         core_port_owner = Get-PortOwner -Port 8011
         live_ready = Test-HttpOk -Url $liveHealth
         offline_ready = Test-HttpOk -Url $offlineHealth
+        offline_analysis_enabled = if ($null -eq $state) { $null } else { $state.offlineAnalysisEnabled }
         mirror_ready = Test-HttpOk -Url $mirrorUrl
         core_ready = Test-HttpOk -Url $coreHealth
         url = $mirrorUrl
@@ -185,10 +187,12 @@ if ($null -eq $state) {
         mirrorPid = $null
         corePid = $null
         offlinePid = $null
+        offlineAnalysisEnabled = $true
         browserProfile = $browserProfile
     }
 }
 $state.startedAt = (Get-Date).ToString("o")
+$state.offlineAnalysisEnabled = -not $DisableOfflineAnalysis
 
 $startedLive = $null
 $startedMirror = $null
@@ -196,7 +200,7 @@ $startedCore = $null
 $startedOffline = $null
 
 try {
-    if (-not (Test-HttpOk -Url $offlineHealth)) {
+    if (-not $DisableOfflineAnalysis -and -not (Test-HttpOk -Url $offlineHealth)) {
         if (Get-PortOwner -Port 8030) {
             throw "Port 8030 is occupied but the Offline Worker health check failed."
         }
@@ -239,10 +243,12 @@ try {
         $oldOfflineUrl = $env:VIGORYSYNC_OFFLINE_URL
         $oldOfflineToken = $env:VIGORYSYNC_OFFLINE_INTERNAL_TOKEN
         $oldOfflineRoot = $env:VIGORYSYNC_OFFLINE_DATA_ROOT
+        $oldOfflineAnalysisEnabled = $env:VIGORYSYNC_OFFLINE_ANALYSIS_ENABLED
         $env:PYTHONPATH = Join-Path $projectRoot "services\core-api\src"
         $env:VIGORYSYNC_OFFLINE_URL = "http://127.0.0.1:8030"
         $env:VIGORYSYNC_OFFLINE_INTERNAL_TOKEN = $offlineToken
         $env:VIGORYSYNC_OFFLINE_DATA_ROOT = Join-Path $projectRoot "webdata\offline"
+        $env:VIGORYSYNC_OFFLINE_ANALYSIS_ENABLED = if ($DisableOfflineAnalysis) { "0" } else { "1" }
         try {
             $startedCore = Start-Process `
                 -FilePath $python `
@@ -258,6 +264,7 @@ try {
             $env:VIGORYSYNC_OFFLINE_URL = $oldOfflineUrl
             $env:VIGORYSYNC_OFFLINE_INTERNAL_TOKEN = $oldOfflineToken
             $env:VIGORYSYNC_OFFLINE_DATA_ROOT = $oldOfflineRoot
+            $env:VIGORYSYNC_OFFLINE_ANALYSIS_ENABLED = $oldOfflineAnalysisEnabled
         }
         $state.corePid = $startedCore.Id
         if (-not (Wait-Until -Condition { Test-HttpOk -Url $coreHealth })) {

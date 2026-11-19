@@ -27,6 +27,7 @@ const elements = {
   confidenceLabel: document.querySelector("#confidence-label"),
   fpsLabel: document.querySelector("#fps-label"),
   alert: document.querySelector("#alert"),
+  alertKicker: document.querySelector("#alert-kicker"),
   alertMessage: document.querySelector("#alert-message"),
   pauseButton: document.querySelector("#pause-button"),
   stopButton: document.querySelector("#stop-button"),
@@ -57,6 +58,10 @@ const phaseNames = {
   down: "底部",
   transition: "移动中",
   unknown: "等待姿态",
+};
+
+const analysisStageNames = {
+  disabled: "离线分析已关闭",
 };
 
 let currentSession = null;
@@ -152,9 +157,23 @@ function updateMetrics(metrics) {
   elements.fpsLabel.textContent = fps ? `推理 ${fps.toFixed(1)} FPS` : "推理 -- FPS";
 }
 
-function showAlert(message) {
-  if (!message) return;
-  elements.alertMessage.textContent = message;
+function showAlert(input) {
+  const payload =
+    typeof input === "string"
+      ? { message: input, severity: "medium" }
+      : input || {};
+  if (!payload.message) return;
+  const severity = ["low", "medium", "high"].includes(payload.severity)
+    ? payload.severity
+    : "medium";
+  elements.alert.dataset.severity = severity;
+  elements.alertKicker.textContent =
+    severity === "high"
+      ? "FORM CORRECTION · 高优先级"
+      : severity === "low"
+        ? "FORM CORRECTION · 提示"
+        : "FORM CORRECTION";
+  elements.alertMessage.textContent = payload.message;
   elements.alert.hidden = false;
   window.clearTimeout(alertTimer);
   alertTimer = window.setTimeout(() => {
@@ -240,7 +259,7 @@ function connectLiveSocket() {
     if (message.type === "live.metrics") {
       updateMetrics(message.payload);
     } else if (message.type === "form.alert") {
-      showAlert(message.payload.message);
+      showAlert(message.payload);
     } else if (message.type === "session.state") {
       handleSessionState(message.session_id, message.payload);
     }
@@ -329,7 +348,7 @@ function handleMirrorMessage(message) {
   if (message.type === "live.metrics") {
     updateMetrics(message.payload);
   } else if (message.type === "form.alert") {
-    showAlert(message.payload.message);
+    showAlert(message.payload);
   } else if (message.type === "session.state") {
     handleSessionState(message.session_id, message.payload);
   } else if (message.type === "report.progress") {
@@ -365,7 +384,7 @@ function updateAnalysisProgress(payload) {
   if (!payload) return;
   const progress = Math.max(0, Math.min(1, Number(payload.progress) || 0));
   elements.analysisStatusText.textContent =
-    `${payload.stage || "queued"} · ${Math.round(progress * 100)}%`;
+    `${analysisStageNames[payload.stage] || payload.stage || "queued"} · ${Math.round(progress * 100)}%`;
   elements.analysisProgressBar.style.width = `${progress * 100}%`;
 }
 
@@ -599,7 +618,7 @@ async function showSummary(sessionId, detail = null) {
   elements.openReportButton.hidden = true;
   elements.analysisFinding.hidden = true;
   elements.analysisStatusText.textContent =
-    session.analysis?.stage || "queued";
+    analysisStageNames[session.analysis?.stage] || session.analysis?.stage || "queued";
   elements.analysisProgressBar.style.width =
     `${Math.round((Number(session.analysis?.progress) || 0) * 100)}%`;
   if (session.report_url) {
