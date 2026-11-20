@@ -14,6 +14,7 @@ import html
 import json
 import math
 import re
+import shutil
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--contracts", type=Path, default=DEFAULT_CONTRACTS)
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
     parser.add_argument("--clip-id", nargs="+", default=None)
+    parser.add_argument(
+        "--trajectory-dir",
+        type=Path,
+        default=None,
+        help="Optional DTW overlay root holding <clip_id>/overlay.json.",
+    )
     parser.add_argument(
         "--split",
         default="all",
@@ -2370,6 +2377,335 @@ PROCESS_METRICS_SCRIPT = r"""
 """
 
 
+TRAJECTORY_CHART_SCRIPT = r"""
+(() => {
+  const data = window.__VIGORYSYNC_TRAJECTORY__ || null;
+  const stage = document.getElementById('trajectory-stage');
+  const canvas = document.getElementById('trajectory-canvas');
+  const tip = document.getElementById('trajectory-tip');
+  const legend = document.getElementById('trajectory-legend');
+  if (!data || !stage || !canvas) return;
+  const progress = (data.progress || []).map(Number);
+  const template = (data.template_curve || []).map(Number);
+  if (!progress.length || !template.length) return;
+  const flexed = Number(data.template_flexed_progress_pct);
+  const reps = (data.user_reps || []).map((rep, index) => ({
+    id: rep.rep_id,
+    curve: (rep.curve || []).map(Number),
+    hidden: false,
+    color: '#86e8ff'
+  }));
+  const rampColor = (index, count) => {
+    const t = count <= 1 ? 0.5 : index / (count - 1);
+    return `hsl(191, 72%, ${(45 + 45 * t).toFixed(1)}%)`;
+  };
+  reps.forEach((rep, index) => {
+    rep.color = rampColor(index, reps.length);
+  });
+
+  const chips = legend ? [...legend.querySelectorAll('[data-rep-index]')] : [];
+  chips.forEach((chip) => {
+    const rep = reps[Number(chip.dataset.repIndex)];
+    if (rep) chip.style.setProperty('--key', rep.color);
+  });
+
+  const state = { width: 0, height: 0, dpr: 1, hover: -1 };
+  const PAD = { left: 46, right: 14, top: 16, bottom: 26 };
+  const ctx = canvas.getContext('2d');
+  const fmt = (value, digits = 1) => Number.isFinite(value) ? value.toFixed(digits) : '--';
+
+  function resize() {
+    state.width = Math.max(240, stage.clientWidth);
+    state.height = Math.max(180, stage.clientHeight);
+    state.dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(state.width * state.dpr);
+    canvas.height = Math.round(state.height * state.dpr);
+    ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+  }
+
+  function limits() {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const value of template) {
+      if (!Number.isFinite(value)) continue;
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+    }
+    for (const rep of reps) for (const value of rep.curve) {
+      if (!Number.isFinite(value)) continue;
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+    }
+    if (!Number.isFinite(min)) return { min: 0, max: 180 };
+    if (max - min < 20) {
+      const mid = (max + min) / 2;
+      min = mid - 10;
+      max = mid + 10;
+    }
+    const pad = (max - min) * 0.08;
+    return { min: min - pad, max: max + pad };
+  }
+
+  function draw() {
+    const plot = {
+      left: PAD.left,
+      top: PAD.top,
+      width: Math.max(1, state.width - PAD.left - PAD.right),
+      height: Math.max(1, state.height - PAD.top - PAD.bottom)
+    };
+    const range = limits();
+    const x = (value) => plot.left + Math.min(1, Math.max(0, (Number(value) || 0) / 100)) * plot.width;
+    const y = (value) => plot.top + (range.max - value) / (range.max - range.min) * plot.height;
+
+    ctx.clearRect(0, 0, state.width, state.height);
+    ctx.fillStyle = 'rgba(241,240,231,.018)';
+    ctx.fillRect(plot.left, plot.top, plot.width, plot.height);
+
+    ctx.lineWidth = 1;
+    ctx.font = '9px ui-monospace,Consolas,monospace';
+    for (let step = 0; step <= 4; step += 1) {
+      const value = range.max - (range.max - range.min) * step / 4;
+      const py = y(value);
+      ctx.strokeStyle = 'rgba(241,240,231,.11)';
+      ctx.beginPath();
+      ctx.moveTo(plot.left, py);
+      ctx.lineTo(plot.left + plot.width, py);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(158,163,154,.86)';
+      ctx.fillText(value.toFixed(0), 4, py + 3);
+    }
+    for (let value = 0; value <= 100; value += 25) {
+      const px = x(value);
+      ctx.strokeStyle = 'rgba(241,240,231,.07)';
+      ctx.beginPath();
+      ctx.moveTo(px, plot.top);
+      ctx.lineTo(px, plot.top + plot.height);
+      ctx.stroke();
+      const width = ctx.measureText(String(value)).width;
+      ctx.fillStyle = 'rgba(158,163,154,.86)';
+      ctx.fillText(String(value), px - (value === 0 ? 0 : value === 100 ? width : width / 2), plot.top + plot.height + 14);
+    }
+
+    if (Number.isFinite(flexed)) {
+      const px = x(flexed);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(241,240,231,.32)';
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(px, plot.top);
+      ctx.lineTo(px, plot.top + plot.height);
+      ctx.stroke();
+      ctx.restore();
+      ctx.font = '9px "Microsoft YaHei",system-ui,sans-serif';
+      ctx.fillStyle = 'rgba(158,163,154,.9)';
+      const label = '标准最低点';
+      const width = ctx.measureText(label).width;
+      ctx.fillText(label, Math.min(plot.left + plot.width - width, Math.max(plot.left, px + 4)), plot.top + 10);
+      ctx.font = '9px ui-monospace,Consolas,monospace';
+    }
+
+    const stroke = (values, color, width, dash, glow) => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      if (dash) ctx.setLineDash(dash);
+      if (glow) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = glow;
+      }
+      ctx.beginPath();
+      let started = false;
+      for (let index = 0; index < values.length; index += 1) {
+        const value = values[index];
+        if (!Number.isFinite(value)) {
+          started = false;
+          continue;
+        }
+        const pointX = x(progress[index]);
+        const pointY = y(value);
+        if (!started) {
+          ctx.moveTo(pointX, pointY);
+          started = true;
+        } else {
+          ctx.lineTo(pointX, pointY);
+        }
+      }
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    for (const rep of reps) if (!rep.hidden) stroke(rep.curve, rep.color, 1.6, null, 0);
+    stroke(template, '#d9ff43', 2.4, [7, 5], 6);
+
+    if (state.hover >= 0) {
+      const px = x(progress[state.hover]);
+      ctx.strokeStyle = 'rgba(241,240,231,.5)';
+      ctx.beginPath();
+      ctx.moveTo(px, plot.top);
+      ctx.lineTo(px, plot.top + plot.height);
+      ctx.stroke();
+      const dot = (values, color) => {
+        const value = values[state.hover];
+        if (!Number.isFinite(value)) return;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(px, y(value), 2.6, 0, Math.PI * 2);
+        ctx.fill();
+      };
+      for (const rep of reps) if (!rep.hidden) dot(rep.curve, rep.color);
+      dot(template, '#d9ff43');
+    }
+  }
+
+  function updateTip(index) {
+    if (!tip) return;
+    if (index < 0) {
+      tip.hidden = true;
+      return;
+    }
+    const rows = [`<b>进度 ${progress[index].toFixed(0)}%</b>`];
+    rows.push(`<span class="t-row"><i class="t-dot" style="background:#d9ff43"></i>标准 ${fmt(template[index])}°</span>`);
+    for (const rep of reps) {
+      if (rep.hidden) continue;
+      rows.push(`<span class="t-row"><i class="t-dot" style="background:${rep.color}"></i>第 ${rep.id} 次 ${fmt(rep.curve[index])}°</span>`);
+    }
+    tip.innerHTML = rows.join('');
+    tip.hidden = false;
+    const left = PAD.left + (progress[index] / 100) * Math.max(1, state.width - PAD.left - PAD.right);
+    const width = tip.offsetWidth;
+    tip.style.left = `${Math.min(state.width - width - 8, Math.max(8, left + 12))}px`;
+    tip.style.top = '8px';
+  }
+
+  function nearestIndex(pointerX) {
+    const width = Math.max(1, state.width - PAD.left - PAD.right);
+    const ratio = Math.min(1, Math.max(0, (pointerX - PAD.left) / width));
+    return Math.round(ratio * (progress.length - 1));
+  }
+
+  canvas.addEventListener('pointermove', (event) => {
+    const rect = canvas.getBoundingClientRect();
+    state.hover = nearestIndex(event.clientX - rect.left);
+    updateTip(state.hover);
+    draw();
+  });
+  canvas.addEventListener('pointerleave', () => {
+    state.hover = -1;
+    if (tip) tip.hidden = true;
+    draw();
+  });
+
+  chips.forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const rep = reps[Number(chip.dataset.repIndex)];
+      if (!rep) return;
+      rep.hidden = !rep.hidden;
+      chip.classList.toggle('is-off', rep.hidden);
+      chip.setAttribute('aria-pressed', String(!rep.hidden));
+      if (state.hover >= 0) updateTip(state.hover);
+      draw();
+    });
+  });
+
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      resize();
+      draw();
+    }).observe(stage);
+  } else {
+    window.addEventListener('resize', () => {
+      resize();
+      draw();
+    });
+  }
+  resize();
+  draw();
+})();
+"""
+
+
+def build_trajectory_section(
+    output_dir: Path, trajectory_dir: Path | None, clip_id: str
+) -> str:
+    """Render the optional DTW trajectory block for report_v2.html."""
+    if trajectory_dir is None:
+        return ""
+    json_path = trajectory_dir / clip_id / "overlay.json"
+    if not json_path.is_file():
+        return ""
+    overlay = json.loads(json_path.read_text(encoding="utf-8"))
+    reps = [rep for rep in overlay.get("user_reps") or [] if rep.get("curve")]
+    template_curve = overlay.get("template_curve") or []
+    if not reps or not template_curve:
+        return ""
+    angles = overlay.get("angles") or {}
+    units = overlay.get("units", "")
+    unit_label = "°" if units == "degrees" else units
+    band = overlay.get("dtw_band_hit_reps") or []
+    excluded = overlay.get("excluded_reps") or []
+    target = output_dir / "trajectory"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(json_path, target / "overlay.json")
+    bottoms = [min(rep["curve"]) for rep in reps]
+    tops = [max(rep["curve"]) for rep in reps]
+    template_range = (
+        f"{min(template_curve):.1f}–{max(template_curve):.1f} {unit_label}".strip()
+        if template_curve
+        else "-"
+    )
+    user_range = (
+        f"底 {min(bottoms):.1f}–{max(bottoms):.1f} / 顶 {min(tops):.1f}–{max(tops):.1f}"
+        if reps
+        else "-"
+    )
+    excluded_text = "、".join(
+        f"rep {item['rep_id']}（{item['reason']}）" for item in excluded
+    ) or "无"
+    band_set = {int(rep_id) for rep_id in band}
+    band_text = "、".join(f"rep {rep_id}" for rep_id in band) or "无"
+    payload = {
+        "progress": overlay.get("progress") or [],
+        "template_curve": template_curve,
+        "template_flexed_progress_pct": overlay.get("template_flexed_progress_pct"),
+        "dtw_band_hit_reps": band,
+        "user_reps": [
+            {"rep_id": rep.get("rep_id"), "curve": rep["curve"]} for rep in reps
+        ],
+    }
+    payload_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
+    chips = "".join(
+        f'<button type="button" class="trajectory-key" data-rep-index="{index}" '
+        f'aria-pressed="true"><i class="swatch"></i>第 {html.escape(str(rep.get("rep_id")))} 次'
+        + (
+            '<i class="band" title="节奏差异触边"></i>'
+            if int(rep.get("rep_id")) in band_set
+            else ""
+        )
+        + "</button>"
+        for index, rep in enumerate(reps)
+    )
+    return f"""<section class="process-card" aria-labelledby="trajectory-title">
+<div class="process-head"><div><p class="eyebrow">DTW TRAJECTORY</p><h2 id="trajectory-title">动作轨迹对比</h2></div><span class="process-policy">形态对照 · 非评分</span></div>
+<div class="trajectory-metrics"><div class="metric"><span>参与对比 rep</span><strong>{len(reps)}</strong></div><div class="metric"><span>标准曲线范围</span><strong>{html.escape(template_range)}</strong></div><div class="metric"><span>用户底端 / 顶端</span><strong>{html.escape(user_range)}</strong></div><div class="metric"><span>节奏差异触边</span><strong>{len(band)}</strong></div></div>
+<p class="trajectory-axis-label">关节角度 (°) · {html.escape(angles.get('user', '-'))}</p>
+<div class="trajectory-stage" id="trajectory-stage">
+<canvas id="trajectory-canvas" role="img" aria-label="用户动作与标准模板的关节角度时序对比"></canvas>
+<div class="trajectory-tip" id="trajectory-tip" hidden></div>
+</div>
+<p class="trajectory-axis-label is-right">动作进度 (%)</p>
+<div class="trajectory-legend" id="trajectory-legend"><span class="trajectory-key is-template"><i class="swatch"></i>标准模板</span>{chips}</div>
+<p class="process-footnote">曲线按 DTW 对齐到标准动作的进度轴，仅用于形态对照，不输出评分、相似度或问题判定。不同视角的对比不会生成，左侧与右侧侧视按同一动作处理。<br>节奏差异触边：{html.escape(band_text)}；被排除 rep：{html.escape(excluded_text)}。</p>
+<p class="process-footnote"><a class="trajectory-download" href="trajectory/overlay.json" download>下载对比数据（overlay.json）</a></p>
+<script>window.__VIGORYSYNC_TRAJECTORY__={payload_json};</script>
+<script>{TRAJECTORY_CHART_SCRIPT}</script>
+</section>
+"""
+
+
 def build_report_html(
     feedback: dict[str, Any],
     *,
@@ -2377,6 +2713,7 @@ def build_report_html(
     frame_url_template: str,
     timeline: dict[str, Any] | None = None,
     motion: dict[str, Any] | None = None,
+    trajectory_html: str = "",
 ) -> str:
     clip_id = feedback["clip_id"]
     timeline = timeline or {"duration_s": 0.0, "reps": []}
@@ -2536,6 +2873,7 @@ background-size:54px 54px,54px 54px,auto,auto,auto;color:var(--ink);font-family:
 .process-card{{margin-top:18px;padding:20px 22px;border:1px solid var(--line);background:linear-gradient(145deg,rgba(255,255,255,.035),transparent 46%),var(--surface)}}
 .process-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:6px}}.process-head h2{{margin:0;font-size:26px}}.process-policy{{padding:5px 9px;border:1px solid rgba(240,197,107,.36);border-radius:999px;color:var(--amber);font-size:9px;white-space:nowrap}}
 .process-intro{{margin:0 0 14px;max-width:900px;color:var(--muted);font-size:11px;line-height:1.65}}.process-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}
+.trajectory-metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin:14px 0;border:1px solid var(--line);background:var(--line)}}.trajectory-axis-label{{margin:14px 0 6px;color:var(--muted);font:9px/1.3 ui-monospace,Consolas,monospace;letter-spacing:.08em}}.trajectory-axis-label.is-right{{margin:6px 0 0;text-align:right}}.trajectory-stage{{position:relative;height:340px;border:1px solid rgba(241,240,231,.08);background:#080b09}}.trajectory-stage canvas{{display:block;width:100%;height:100%;touch-action:none;cursor:crosshair}}.trajectory-tip{{position:absolute;top:8px;left:8px;z-index:2;min-width:132px;padding:7px 9px;border:1px solid var(--line);background:rgba(5,7,6,.94);color:#d8dccf;font:10px/1.65 ui-monospace,Consolas,monospace;pointer-events:none;white-space:nowrap}}.trajectory-tip[hidden]{{display:none}}.trajectory-tip b{{color:var(--ink);font-weight:700}}.trajectory-tip .t-row{{display:flex;align-items:center;gap:5px}}.trajectory-tip .t-dot{{width:6px;height:6px;border-radius:50%;flex:0 0 auto}}.trajectory-legend{{display:flex;flex-wrap:wrap;gap:6px;margin:9px 0 0}}.trajectory-key{{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.02);color:#c8ccc3;font:500 10px/1.2 "Microsoft YaHei",system-ui,sans-serif;cursor:pointer}}.trajectory-key.is-template{{cursor:default;color:var(--muted)}}.trajectory-key .swatch{{width:14px;border-top:2px solid var(--key,#86e8ff)}}.trajectory-key.is-template .swatch{{border-top:2px dashed var(--acid)}}.trajectory-key.is-off{{opacity:.42}}.trajectory-key .band{{width:5px;height:5px;border-radius:50%;background:var(--amber)}}.trajectory-download{{color:var(--cyan);text-decoration:none}}.trajectory-download:hover{{text-decoration:underline}}
 .process-metric{{min-width:0;padding:15px;border:1px solid var(--line);border-top:2px solid var(--cyan);background:var(--panel)}}.process-metric.attention{{border-top-color:var(--amber)}}.process-metric.abnormal{{border-top-color:var(--signal)}}.process-metric.unavailable{{border-top-color:var(--muted)}}
 .process-metric-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}}.process-metric-head>div{{display:flex;align-items:baseline;gap:7px;min-width:0}}.process-index{{color:var(--muted);font:9px/1 ui-monospace,Consolas,monospace}}.process-metric h3{{margin:0;font-size:16px;line-height:1.25}}
 .process-status{{padding:4px 7px;border-radius:999px;font-size:9px;font-weight:800;white-space:nowrap}}.process-status.normal{{background:rgba(134,232,255,.12);color:var(--cyan)}}.process-status.attention{{background:rgba(240,197,107,.12);color:var(--amber)}}.process-status.abnormal{{background:rgba(255,100,77,.14);color:var(--signal)}}.process-status.unavailable{{background:rgba(158,163,154,.1);color:var(--muted)}}
@@ -2558,7 +2896,7 @@ background-size:54px 54px,54px 54px,auto,auto,auto;color:var(--ink);font-family:
 .issue-footer{{display:flex;align-items:end;justify-content:space-between;gap:14px;margin-top:14px}}.limit{{max-width:720px;margin:0;color:var(--muted);font-size:10px;line-height:1.55}}
 button{{flex:0 0 auto;padding:9px 13px;border:1px solid rgba(134,232,255,.4);border-radius:3px;background:rgba(134,232,255,.08);color:var(--cyan);font-weight:750;cursor:pointer}}
 .empty{{padding:22px;border:1px dashed var(--line);color:var(--muted)}}.limitations{{padding:20px 22px}}.limitations ul{{margin:0;padding-left:18px;color:var(--muted);line-height:1.8}}
-@media(max-width:960px){{.shell{{width:min(100% - 24px,720px);padding-top:16px}}.topbar{{align-items:flex-start}}.job-id{{max-width:46vw}}.hero{{grid-template-columns:1fr}}.video-frame{{min-height:210px}}video{{max-height:none}}.rep-timeline{{padding:13px 12px 11px}}.snapshot{{grid-template-columns:1fr;padding:20px}}.metrics{{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:4px}}.motion-stage{{height:430px}}.process-grid{{grid-template-columns:1fr}}.process-card{{padding:17px}}.section-head{{align-items:flex-start;flex-direction:column;gap:5px}}.issue-footer{{align-items:stretch;flex-direction:column}}.issue-footer button{{width:100%}}.confidence{{margin-left:0}}}}
+@media(max-width:960px){{.shell{{width:min(100% - 24px,720px);padding-top:16px}}.topbar{{align-items:flex-start}}.job-id{{max-width:46vw}}.hero{{grid-template-columns:1fr}}.video-frame{{min-height:210px}}video{{max-height:none}}.rep-timeline{{padding:13px 12px 11px}}.snapshot{{grid-template-columns:1fr;padding:20px}}.metrics{{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:4px}}.motion-stage{{height:430px}}.process-grid{{grid-template-columns:1fr}}.process-card{{padding:17px}}.trajectory-stage{{height:260px}}.section-head{{align-items:flex-start;flex-direction:column;gap:5px}}.issue-footer{{align-items:stretch;flex-direction:column}}.issue-footer button{{width:100%}}.confidence{{margin-left:0}}}}
 @media(max-width:520px){{.topbar{{flex-direction:column;align-items:stretch;gap:12px}}.job-id{{width:100%;max-width:none;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}}}
 @media(prefers-reduced-motion:reduce){{*{{transition:none!important}}}}
 </style></head><body><main class="shell">
@@ -2587,6 +2925,7 @@ button{{flex:0 0 auto;padding:9px 13px;border:1px solid rgba(134,232,255,.4);bor
 <div class="process-grid">{process_cards}</div>
 <p class="process-footnote">曲线按约 12 Hz 抽样；遮挡段沿用骨架预测并降低置信度。阈值用于产品内复盘与趋势比较，并非临床诊断标准。</p>
 </section>
+{trajectory_html}
 <section class="snapshot"><div><p class="eyebrow">SESSION SNAPSHOT</p><h1>{exercise_label}<em>离线复盘</em></h1><span class="status">{quality_label}</span></div>
 <div class="metrics"><div class="metric"><span>离线计数</span><strong>{summary.get('rep_count',0)}</strong></div><div class="metric"><span>问题</span><strong>{issue_count}</strong></div><div class="metric"><span>可评估指标</span><strong>{summary.get('evaluable_metric_count',0)}</strong></div><div class="metric"><span>质量</span><strong>{html.escape(quality.upper())}</strong></div></div>
 </section>
@@ -2830,6 +3169,9 @@ def main() -> int:
         media_url = args.media_url_template.format(clip_id=clip_id)
         timeline_payload = build_report_timeline(assessment)
         motion_payload = build_motion_payload(args.analysis_dir, analysis, timeline_payload)
+        trajectory_section = build_trajectory_section(
+            output, args.trajectory_dir, clip_id
+        )
         (output / "report_v2.html").write_text(
             build_report_html(
                 feedback,
@@ -2837,6 +3179,7 @@ def main() -> int:
                 frame_url_template=args.frame_url_template,
                 timeline=timeline_payload,
                 motion=motion_payload,
+                trajectory_html=trajectory_section,
             ),
             encoding="utf-8",
         )

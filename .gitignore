@@ -19,3 +19,8 @@ output/
 window*.xml
 vigorsync-pairing.png
 文献/
+
+# Generated analysis runs and reports
+reference_data/analysis/
+reference_data/test/
+reports/
