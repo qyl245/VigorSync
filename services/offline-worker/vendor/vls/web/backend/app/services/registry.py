@@ -24,6 +24,7 @@ from ..schemas.samples import (
     FeedbackSummary,
     IssueItem,
     PhaseItem,
+    RealtimeReview,
     QualityGate,
     RepItem,
     RepProvenance,
@@ -524,6 +525,13 @@ def _build_feedback_summary(feedback_v2: dict[str, Any] | None) -> FeedbackSumma
     )
 
 
+def _build_realtime_review(source: Source) -> RealtimeReview | None:
+    path = source.analysis_dir / "realtime_review.json"
+    if not path.is_file():
+        return None
+    return RealtimeReview.model_validate_json(path.read_text(encoding="utf-8"))
+
+
 def _fallback_state(
     issues: list[IssueItem], reps: list[RepItem], quality: dict[str, Any]
 ) -> str:
@@ -565,6 +573,7 @@ def detail_of(source: Source) -> SampleDetail:
         rep_selection=_build_rep_selection(analysis),
         assessment=_build_assessment_summary(feedback_v2),
         feedback=feedback_summary,
+        realtime_review=_build_realtime_review(source),
         state=state,
         report_url=source.report_url,
         feedback_report_url=source.feedback_report_url,

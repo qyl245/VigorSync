@@ -7,10 +7,11 @@ import re
 import secrets
 import shutil
 import sys
+import logging
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 
@@ -37,9 +38,16 @@ from app.schemas.jobs import JobRecord  # noqa: E402
 from app.storage import db as vls_db  # noqa: E402
 from app.workers.manager import manager as vls_manager  # noqa: E402
 
+from .realtime_bridge import enrich_job_realtime_review  # noqa: E402
 
+
+logger = logging.getLogger("uvicorn.error")
 _SESSION_ID = re.compile(r"^s_[A-Za-z0-9_-]{6,64}$")
 _JOB_ID = re.compile(r"^job_[A-Za-z0-9_-]{6,64}$")
+_ARTIFACT_ROUTE = re.compile(
+    r"^/api/v1/jobs/(job_[A-Za-z0-9_-]{6,64})/"
+    r"(?:result|feedback-report)$"
+)
 _OFFLINE_TOKEN = os.getenv(
     "VIGORYSYNC_OFFLINE_INTERNAL_TOKEN",
     "vigorsync-offline-dev",
@@ -61,6 +69,7 @@ class EnqueueJobRequest(BaseModel):
     rotation: str = "none"
     trim_start_frame: int = Field(default=0, ge=0)
     trim_end_frame: int = Field(default=0, ge=0)
+    realtime_events_path: str | None = None
 
 
 def _require_internal(
@@ -86,6 +95,31 @@ def _safe_source(value: str) -> Path:
     return source
 
 
+def _safe_realtime_events(
+    value: str | None,
+    session_id: str,
+) -> Path | None:
+    if not value:
+        return None
+    source = Path(value).expanduser().resolve()
+    session_root = (_SESSION_ROOT / session_id).resolve()
+    try:
+        source.relative_to(session_root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="realtime_events_outside_session",
+        ) from exc
+    if not source.is_file():
+        raise HTTPException(status_code=400, detail="realtime_events_missing")
+    if source.suffix.lower() != ".jsonl":
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_realtime_events_type",
+        )
+    return source
+
+
 @app.post(
     "/internal/v1/jobs",
     status_code=202,
@@ -102,6 +136,10 @@ def enqueue_job(payload: EnqueueJobRequest) -> JobRecord:
         return existing
 
     source = _safe_source(payload.source_path)
+    realtime_events = _safe_realtime_events(
+        payload.realtime_events_path,
+        payload.session_id,
+    )
     job_dir = vls_config.JOBS_DIR / payload.job_id
     input_dir = job_dir / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -112,6 +150,11 @@ def enqueue_job(payload: EnqueueJobRequest) -> JobRecord:
         os.link(source, target)
     except OSError:
         shutil.copy2(source, target)
+    if realtime_events is not None:
+        shutil.copy2(
+            realtime_events,
+            input_dir / "realtime-events.jsonl",
+        )
 
     request = {
         "source_kind": "upload",
@@ -127,6 +170,11 @@ def enqueue_job(payload: EnqueueJobRequest) -> JobRecord:
             "start_frame": payload.trim_start_frame,
             "end_frame": payload.trim_end_frame,
         },
+        "realtime_events_path": (
+            "input/realtime-events.jsonl"
+            if realtime_events is not None
+            else None
+        ),
     }
     record = JobRecord(
         job_id=payload.job_id,
@@ -149,6 +197,23 @@ def enqueue_job(payload: EnqueueJobRequest) -> JobRecord:
     vls_db.insert_job(record, request)
     vls_manager.enqueue(payload.job_id)
     return record
+
+
+@app.middleware("http")
+async def attach_realtime_review(request: Request, call_next):
+    match = _ARTIFACT_ROUTE.fullmatch(request.url.path)
+    if match:
+        try:
+            enrich_job_realtime_review(
+                vls_config.JOBS_DIR / match.group(1),
+                PROJECT_ROOT,
+            )
+        except Exception:
+            logger.exception(
+                "realtime review enrichment failed job_id=%s",
+                match.group(1),
+            )
+    return await call_next(request)
 
 
 def run() -> None:

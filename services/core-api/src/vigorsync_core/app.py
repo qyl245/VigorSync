@@ -316,6 +316,7 @@ def create_app(
                 (result.get("confidence") or {}).get("mean_confidence") or 0.0
             ),
             "issues": issues,
+            "realtime_review": result.get("realtime_review"),
         }
 
     async def mark_analysis_failed(
@@ -472,6 +473,7 @@ def create_app(
         record = get_session_or_404(session_id)
         job_id = record.get("job_id") or f"job_{secrets.token_hex(8)}"
         video_path = artifacts.get("video_path")
+        events_path = artifacts.get("events_path")
         database.update_session(
             session_id,
             job_id=job_id,
@@ -495,6 +497,7 @@ def create_app(
                     "exercise": record["exercise"],
                     "view": record["view"],
                     "rotation": "none",
+                    "realtime_events_path": events_path,
                 },
             )
         except OfflineWorkerError as exc:

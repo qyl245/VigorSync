@@ -88,6 +88,10 @@
       "type": "array",
       "items": {"$ref": "#/$defs/card"}
     },
+    "realtime_review": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
     "limitations": {
       "type": "array",
       "items": {

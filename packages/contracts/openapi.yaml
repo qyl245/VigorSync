@@ -311,6 +311,11 @@ components:
           items:
             type: object
             additionalProperties: true
+        realtime_review:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
       additionalProperties: false
 
     SessionReport:

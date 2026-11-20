@@ -6,10 +6,12 @@
 ## 范围
 
 - 从训练会话接收本机视频路径。
+- 接收同一会话的实时 `events.jsonl`，按 canonical issue code 与离线问题卡关联。
 - 使用共享磁盘硬链接，失败时回退为复制。
 - 执行 VLS 的 `analysis_v1 -> RepChain -> issues -> feedback_v2 -> report` 流水线。
 - 维护独立 SQLite 队列和任务产物。
 - 生成报告 HTML、证据帧、媒体片段和完整产物清单。
+- 实时-only 问题在报告中标记为“离线未形成问题卡”，不改变离线结论。
 
 样例库、上传页面和 VLS 实验脚本未迁入本服务。
 
@@ -64,10 +66,14 @@ Content-Type: application/json
   "source_path": "E:\\project\\Exercise\\VigorSync\\webdata\\sessions\\s_x\\input\\source.mp4",
   "exercise": "pushup",
   "view": "side_right",
-  "rotation": "none"
+  "rotation": "none",
+  "realtime_events_path": "E:\\project\\Exercise\\VigorSync\\webdata\\sessions\\s_x\\live\\events.jsonl"
 }
 ```
 
 同一 `job_id` 重复提交会返回已有任务。任务状态与结果仍使用 VLS 的
 `/api/v1/jobs/{job_id}` 和 `/api/v1/jobs/{job_id}/result`，但这些接口只应供
 Core 在本机调用。
+
+结果中的 `realtime_review` 和产物 `realtime_review.json` 记录实时/离线匹配。
+没有事件文件的旧任务仍按原有流程分析。

@@ -73,10 +73,12 @@ class FakeOffline:
     def __init__(self) -> None:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str]] = []
+        self.payloads: list[dict[str, Any]] = []
 
     async def enqueue(self, payload: dict[str, Any]) -> dict[str, Any]:
         job_id = payload["job_id"]
         self.calls.append(("enqueue", job_id))
+        self.payloads.append(dict(payload))
         self.jobs[job_id] = {
             "job_id": job_id,
             "status": "queued",
@@ -611,6 +613,10 @@ class CoreApiTests(unittest.TestCase):
         )
         self.assertEqual(200, stopped.status_code, stopped.text)
         job_id = stopped.json()["job_id"]
+        self.assertEqual(
+            "/tmp/events.jsonl",
+            self.offline.payloads[-1]["realtime_events_path"],
+        )
         ticket = "report-ticket-test"
         summary = {
             "rep_count": 8,

@@ -457,7 +457,19 @@ configs/issues/
 - 契约校验会检查目录 Schema、重复码、动作前缀、能力声明及
   `common.schema.json#/$defs/IssueCode` 的一致性。
 
-M4.4.2 将补齐实时事件向 Offline Worker 的透传、问题码匹配和报告标记。
+实现记录（M4.4.2，2026-11-20）：
+
+- Core 创建离线任务时透传 `events_path`，Worker 仅接受当前 session 目录内的
+  JSONL 文件，并复制为 job 本地 `realtime-events.jsonl`。
+- Worker 按 canonical issue code 精确匹配实时 `form.alert` 和离线问题卡。
+- 离线报告新增“实时提示关联”：匹配项标记实时次数，实时-only 项明确显示
+  “离线未形成问题卡”。
+- 不把 `pushup_hip_pike` 合并为 `pushup_hip_sag`，也不把实时提示提升为离线结论。
+- 新增 `realtime_review.json` 并同步到 `feedback_v2.json`、结果 API 和
+  `report_v2.html`；完成清单的哈希会随后处理结果刷新。
+- 没有实时事件的历史 job 保持正常分析，不因缺少关联文件失败。
+
+M4.4.3 将补充 VLS taxonomy/template 同步、跨端文案一致性检查和固定回放验收。
 
 ## 10. 测试与指标
 

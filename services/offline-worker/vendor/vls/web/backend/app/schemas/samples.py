@@ -220,6 +220,28 @@ class FeedbackSummary(BaseModel):
     expert_calibrated: bool = False
 
 
+class RealtimeIssueItem(BaseModel):
+    code: str
+    title: str
+    short_cue: str
+    count: int
+    first_s: float
+    last_s: float
+    severity: str
+    matched_offline: bool
+
+
+class RealtimeReview(BaseModel):
+    schema_version: str
+    state: Literal["available", "empty", "missing"]
+    event_count: int
+    issues: list[RealtimeIssueItem] = Field(default_factory=list)
+    matched_codes: list[str] = Field(default_factory=list)
+    live_only_codes: list[str] = Field(default_factory=list)
+    offline_only_codes: list[str] = Field(default_factory=list)
+    parse_errors: int = 0
+
+
 class SampleDetail(BaseModel):
     sample: SampleSummary
     video: VideoRef
@@ -231,6 +253,7 @@ class SampleDetail(BaseModel):
     rep_selection: RepSelection | None = None
     assessment: AssessmentSummary | None = None
     feedback: FeedbackSummary | None = None
+    realtime_review: RealtimeReview | None = None
     state: Literal[
         "active_issues",
         "no_reliable_issue",

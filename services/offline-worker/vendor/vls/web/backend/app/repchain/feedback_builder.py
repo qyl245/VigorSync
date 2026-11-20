@@ -895,6 +895,13 @@ def build_report_html(
         "low": "提示",
     }
     issue_count = len(feedback.get("cards") or [])
+    realtime = feedback.get("realtime_review") or {}
+    realtime_issues = list(realtime.get("issues") or [])
+    realtime_by_code = {
+        str(item.get("code")): item
+        for item in realtime_issues
+        if item.get("code")
+    }
     cards_html = []
     for card in feedback.get("cards") or []:
         image = None
@@ -910,6 +917,13 @@ def build_report_html(
         )
         start, end = card["evidence_interval_s"]
         confidence = round(float(card.get("confidence") or 0.0) * 100)
+        realtime_card = realtime_by_code.get(str(card.get("issue_code")))
+        realtime_badge = (
+            f'<span class="realtime-badge">实时也检测到 '
+            f'{int(realtime_card.get("count") or 0)} 次</span>'
+            if realtime_card
+            else ""
+        )
         cards_html.append(
             f"""
             <article class="issue-card {html.escape(card['severity'])}"
@@ -918,6 +932,7 @@ def build_report_html(
               <div class="issue-head">
                 <span class="severity">{html.escape(severity_label.get(card['severity'], card['severity']))}</span>
                 <span class="candidate">研究候选</span>
+                {realtime_badge}
                 <span class="confidence">{confidence}% 置信</span>
               </div>
               <h3>{html.escape(card['title'])}</h3>
@@ -944,6 +959,25 @@ def build_report_html(
         f"<li>{html.escape(item['message'])}</li>"
         for item in feedback.get("limitations") or []
     ) or "<li>本次没有额外限制项。</li>"
+    realtime_html = ""
+    if realtime.get("state") == "available" and realtime_issues:
+        realtime_chips = "".join(
+            (
+                f'<span class="realtime-chip {"matched" if item.get("matched_offline") else "live-only"}">'
+                f'{html.escape(str(item.get("title") or item.get("code")))} · '
+                f'实时 {int(item.get("count") or 0)} 次 · '
+                f'{"离线已复核" if item.get("matched_offline") else "离线未形成问题卡"}'
+                '</span>'
+            )
+            for item in realtime_issues
+        )
+        realtime_html = f"""
+        <section class="realtime-review">
+          <div class="realtime-head"><span>LIVE + OFFLINE</span><strong>实时提示关联</strong></div>
+          <p>本组训练中实时检测到 {int(realtime.get("event_count") or 0)} 次动作提示。匹配使用同一 canonical issue code，不要求离线阈值得出相同结论。</p>
+          <div class="realtime-list">{realtime_chips}</div>
+        </section>
+        """
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#090b0a">
@@ -990,7 +1024,8 @@ video{{display:block;width:100%;aspect-ratio:4/3;max-height:68vh;object-fit:cont
 .issues{{display:grid;gap:14px}}.issue-card{{cursor:pointer;padding:20px;border-left:4px solid var(--cyan);transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease}}.issue-card.active{{box-shadow:inset 0 0 0 1px rgba(241,240,231,.22)}}
 .issue-card:hover{{transform:translateY(-2px)}}.issue-card.high{{border-left-color:var(--signal)}}.issue-card.medium{{border-left-color:var(--amber)}}
 .issue-head{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}.severity,.candidate,.confidence{{padding:4px 8px;border-radius:999px;font-size:10px;font-weight:750}}
-.severity{{background:rgba(255,100,77,.12);color:var(--signal)}}.candidate{{border:1px solid var(--line);color:var(--muted)}}.confidence{{margin-left:auto;color:var(--cyan)}}
+.severity{{background:rgba(255,100,77,.12);color:var(--signal)}}.candidate{{border:1px solid var(--line);color:var(--muted)}}.realtime-badge{{padding:4px 8px;border-radius:999px;background:rgba(134,232,255,.1);color:var(--cyan);font-size:10px;font-weight:750}}.confidence{{margin-left:auto;color:var(--cyan)}}
+.realtime-review{{margin:18px 0;padding:18px 20px;border:1px solid rgba(134,232,255,.28);background:rgba(134,232,255,.05)}}.realtime-head{{display:flex;align-items:center;gap:12px}}.realtime-head span{{color:var(--cyan);font-size:9px;font-weight:800;letter-spacing:.15em}}.realtime-head strong{{font-size:18px}}.realtime-review>p{{margin:10px 0 13px;color:var(--muted);line-height:1.6;font-size:12px}}.realtime-list{{display:flex;gap:7px;flex-wrap:wrap}}.realtime-chip{{padding:6px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10px}}.realtime-chip.matched{{border-color:rgba(217,255,67,.4);color:var(--acid)}}.realtime-chip.live-only{{border-color:rgba(240,197,107,.4);color:var(--amber)}}
 .issue-card h3{{margin:13px 0 7px;font-size:24px}}.detail{{margin:0;color:#c6cbc2;line-height:1.65}}
 .cue{{margin-top:15px;padding:13px 15px;border-left:2px solid var(--acid);background:rgba(217,255,67,.055)}}.cue span{{color:var(--acid);font-size:9px;font-weight:800;letter-spacing:.13em}}.cue p{{margin:5px 0 0;line-height:1.6}}
 .issue-meta{{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}}.issue-meta span{{padding:5px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10px}}
@@ -1010,6 +1045,7 @@ button{{flex:0 0 auto;padding:9px 13px;border:1px solid rgba(134,232,255,.4);bor
 <div class="metrics"><div class="metric"><span>离线计数</span><strong>{summary.get('rep_count',0)}</strong></div><div class="metric"><span>问题</span><strong>{issue_count}</strong></div><div class="metric"><span>可评估指标</span><strong>{summary.get('evaluable_metric_count',0)}</strong></div><div class="metric"><span>质量</span><strong>{html.escape(quality.upper())}</strong></div></div>
 </aside></section>
 <div class="banner">{html.escape(feedback['state_message'])}<small>研究候选结果 · Shadow-only · 不能替代教练或医学判断</small></div>
+{realtime_html}
 <div class="section-head"><h2>问题卡</h2><span>按严重度、持续性、置信度与可执行性排序</span></div>
 <section class="issues">{''.join(cards_html) or '<div class="empty">本次没有达到展示门槛的可靠问题。</div>'}</section>
 <div class="section-head"><h2>限制与未展示项</h2></div><section class="limitations"><ul>{limitations}</ul></section>

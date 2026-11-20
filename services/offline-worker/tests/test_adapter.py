@@ -44,8 +44,12 @@ class OfflineWorkerAdapterTests(unittest.TestCase):
         adapter.vls_manager.enqueue = self.old_enqueue
         self.temp.cleanup()
 
-    def payload(self, source: Path) -> dict[str, str]:
-        return {
+    def payload(
+        self,
+        source: Path,
+        realtime_events: Path | None = None,
+    ) -> dict[str, str]:
+        payload = {
             "job_id": "job_0123456789abcdef",
             "session_id": "s_0123456789abcdef01234567",
             "source_path": str(source),
@@ -53,12 +57,23 @@ class OfflineWorkerAdapterTests(unittest.TestCase):
             "view": "side_right",
             "rotation": "none",
         }
+        if realtime_events is not None:
+            payload["realtime_events_path"] = str(realtime_events)
+        return payload
 
     def test_internal_enqueue_is_authenticated_and_idempotent(self) -> None:
         session_dir = adapter._SESSION_ROOT / "s_0123456789abcdef01234567"
         (session_dir / "input").mkdir(parents=True)
         source = session_dir / "input" / "source.mp4"
         source.write_bytes(b"video")
+        events = session_dir / "live" / "events.jsonl"
+        events.parent.mkdir()
+        events.write_text(
+            '{"type":"form.alert","t_ms":1200,"payload":'
+            '{"code":"pushup_hip_sag","severity":"high",'
+            '"message":"收紧核心"}}\n',
+            encoding="utf-8",
+        )
         headers = {"X-Internal-Token": adapter._OFFLINE_TOKEN}
 
         denied = self.client.post(
@@ -70,17 +85,26 @@ class OfflineWorkerAdapterTests(unittest.TestCase):
         first = self.client.post(
             "/internal/v1/jobs",
             headers=headers,
-            json=self.payload(source),
+            json=self.payload(source, events),
         )
         second = self.client.post(
             "/internal/v1/jobs",
             headers=headers,
-            json=self.payload(source),
+            json=self.payload(source, events),
         )
         self.assertEqual(202, first.status_code, first.text)
         self.assertEqual(first.json(), second.json())
         self.assertTrue(
             (adapter.vls_config.JOBS_DIR / "job_0123456789abcdef" / "input").is_dir()
+        )
+        self.assertEqual(
+            events.read_bytes(),
+            (
+                adapter.vls_config.JOBS_DIR
+                / "job_0123456789abcdef"
+                / "input"
+                / "realtime-events.jsonl"
+            ).read_bytes(),
         )
 
     def test_source_must_stay_inside_session_root(self) -> None:
@@ -92,6 +116,24 @@ class OfflineWorkerAdapterTests(unittest.TestCase):
             json=self.payload(outside),
         )
         self.assertEqual(400, response.status_code)
+
+    def test_realtime_events_must_stay_inside_session(self) -> None:
+        session_dir = adapter._SESSION_ROOT / "s_0123456789abcdef01234567"
+        (session_dir / "input").mkdir(parents=True)
+        source = session_dir / "input" / "source.mp4"
+        source.write_bytes(b"video")
+        outside = self.root / "outside-events.jsonl"
+        outside.write_text("{}\n", encoding="utf-8")
+        response = self.client.post(
+            "/internal/v1/jobs",
+            headers={"X-Internal-Token": adapter._OFFLINE_TOKEN},
+            json=self.payload(source, outside),
+        )
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(
+            "realtime_events_outside_session",
+            response.json()["detail"],
+        )
 
 
 if __name__ == "__main__":
