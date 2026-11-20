@@ -9,7 +9,8 @@ $mobileRoot = Join-Path $projectRoot "apps\mobile"
 $flutterCandidates = @(
     "D:\flutter\bin\flutter.bat",
     "D:\Flutter\bin\flutter.bat",
-    (Join-Path $projectRoot ".flutter\bin\flutter.bat")
+    (Join-Path $projectRoot ".flutter\bin\flutter.bat"),
+    "D:\dev\flutter\bin\flutter.bat"
 )
 $flutter = $flutterCandidates |
     Where-Object { Test-Path -LiteralPath $_ } |
@@ -39,8 +40,12 @@ try {
     }
 
     if ($BuildApk) {
-        $env:JAVA_HOME = "D:\work app\Android\Android Studio\jbr"
-        $env:ANDROID_HOME = "D:\app\Android\SDK"
+        if (-not $env:JAVA_HOME) {
+            $env:JAVA_HOME = "D:\Program\Android\Android studio\jbr"
+        }
+        if (-not $env:ANDROID_HOME) {
+            $env:ANDROID_HOME = "D:\Program\Android\SDK"
+        }
         $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
         if (-not $env:FLUTTER_STORAGE_BASE_URL) {
             $env:FLUTTER_STORAGE_BASE_URL = "https://storage.flutter-io.cn"

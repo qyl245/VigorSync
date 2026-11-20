@@ -218,6 +218,10 @@ def serialize_result(result: Any) -> dict[str, Any]:
     world = result.pose_world_landmarks[0]
     return {
         "detected": True,
+        "landmarks_normalized": [
+            [round(float(point.x), 6), round(float(point.y), 6), round(float(point.z), 6)]
+            for point in normalized
+        ],
         "landmarks_world": [
             [round(float(point.x), 6), round(float(point.y), 6), round(float(point.z), 6)]
             for point in world
@@ -309,8 +313,9 @@ def process_video(
                 record = {
                     "frame_id": frame_id,
                     "timestamp_ms": timestamp_ms,
-                    "landmarks_world": payload["landmarks_world"],
-                    "visibility": payload["visibility"],
+                    "landmarks_normalized": payload.get("landmarks_normalized"),
+                    "landmarks_world": payload.get("landmarks_world"),
+                    "visibility": payload.get("visibility"),
                     "source": "vision",
                     "detected": payload["detected"],
                 }

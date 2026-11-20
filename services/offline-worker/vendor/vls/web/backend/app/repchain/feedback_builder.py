@@ -14,15 +14,18 @@ import html
 import json
 import math
 import re
+import shutil
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
 from jsonschema import Draft202012Validator
 
 import assessment_measurement as measurement_stage
 import assessment_decision as decision_stage
+from motion_metrics import build_process_metrics
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -55,6 +58,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--contracts", type=Path, default=DEFAULT_CONTRACTS)
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
     parser.add_argument("--clip-id", nargs="+", default=None)
+    parser.add_argument(
+        "--trajectory-dir",
+        type=Path,
+        default=None,
+        help="Optional DTW overlay root holding <clip_id>/overlay.json.",
+    )
     parser.add_argument(
         "--split",
         default="all",
@@ -750,6 +759,664 @@ def build_report_timeline(assessment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+MOTION_JOINT_IDS = (0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32)
+MOTION_BONES = (
+    (0, 2),
+    (2, 7),
+    (0, 5),
+    (5, 8),
+    (11, 12),
+    (11, 13),
+    (13, 15),
+    (12, 14),
+    (14, 16),
+    (11, 23),
+    (12, 24),
+    (23, 24),
+    (23, 25),
+    (25, 27),
+    (24, 26),
+    (26, 28),
+    (27, 29),
+    (29, 31),
+    (28, 30),
+    (30, 32),
+)
+MOTION_JOINT_NAME_TO_INDEX = {
+    "left_shoulder": 11,
+    "right_shoulder": 12,
+    "left_elbow": 13,
+    "right_elbow": 14,
+    "left_wrist": 15,
+    "right_wrist": 16,
+    "left_hip": 23,
+    "right_hip": 24,
+    "left_knee": 25,
+    "right_knee": 26,
+    "left_ankle": 27,
+    "right_ankle": 28,
+}
+
+
+def motion_joint_indices(names: Iterable[Any]) -> list[int]:
+    indices = {
+        MOTION_JOINT_NAME_TO_INDEX[str(name)]
+        for name in names
+        if str(name) in MOTION_JOINT_NAME_TO_INDEX
+    }
+    return sorted(indices)
+
+
+MOTION_VIDEO_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 7), (0, 4), (4, 5), (5, 6), (6, 8),
+    (9, 10), (11, 12), (11, 13), (13, 15), (15, 17), (15, 19), (15, 21),
+    (17, 19), (12, 14), (14, 16), (16, 18), (16, 20), (16, 22), (18, 20),
+    (11, 23), (12, 24), (23, 24), (23, 25), (24, 26), (25, 27), (26, 28),
+    (27, 29), (28, 30), (29, 31), (30, 32), (27, 31), (28, 32),
+)
+MOTION_RIGID_BONES = (
+    (11, 13), (13, 15),
+    (12, 14), (14, 16),
+    (23, 25), (25, 27), (27, 29), (29, 31),
+    (24, 26), (26, 28), (28, 30), (30, 32),
+)
+MOTION_SMOOTH_WINDOW = 7
+MOTION_MAX_INTERPOLATION_GAP = 5
+MOTION_MAX_PREDICTION_GAP = 15
+MOTION_VISIBLE_MIN = 0.35
+MOTION_HIGH_CONFIDENCE = 0.65
+MOTION_FOOT_INDICES = (27, 28, 29, 30, 31, 32)
+MOTION_HAND_INDICES = (15, 16, 17, 18, 19, 20, 21, 22)
+MOTION_ANKLE_INDICES = (27, 28)
+MOTION_BONE_CORRECTION_MAX_M = 0.03
+MOTION_ANCHOR_DEAD_BAND_M = 0.005
+MOTION_ANCHOR_MAX_JUMP_M = 0.08
+
+
+def _unit_vector(vector: np.ndarray) -> np.ndarray | None:
+    norm = float(np.linalg.norm(vector))
+    if not math.isfinite(norm) or norm < 1e-8:
+        return None
+    return vector / norm
+
+
+def _smooth_landmarks(
+    points: np.ndarray,
+    visibility: np.ndarray,
+    window: int = MOTION_SMOOTH_WINDOW,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fill short occlusions, predict medium gaps, and preserve long gaps."""
+    from scipy.interpolate import PchipInterpolator
+    from scipy.signal import savgol_filter
+
+    output = np.full_like(points, np.nan, dtype=np.float64)
+    predicted = np.zeros(visibility.shape, dtype=bool)
+    frame_count = len(points)
+    if frame_count < 3:
+        return output, predicted
+    frame_axis = np.arange(frame_count)
+    effective_window = min(window, frame_count if frame_count % 2 == 1 else frame_count - 1)
+    if effective_window < 3:
+        effective_window = 3
+
+    for joint_id in range(points.shape[1]):
+        valid = (
+            (visibility[:, joint_id] >= MOTION_VISIBLE_MIN)
+            & np.isfinite(points[:, joint_id]).all(axis=1)
+        )
+        valid_indices = np.flatnonzero(valid)
+        if len(valid_indices) < 2:
+            continue
+        output[valid, joint_id, :] = points[valid, joint_id, :]
+        invalid_runs: list[tuple[int, int]] = []
+        start = None
+        for frame_index, is_valid in enumerate(valid):
+            if not is_valid and start is None:
+                start = frame_index
+            elif is_valid and start is not None:
+                invalid_runs.append((start, frame_index - 1))
+                start = None
+        if start is not None:
+            invalid_runs.append((start, frame_count - 1))
+
+        for gap_start, gap_end in invalid_runs:
+            gap_length = gap_end - gap_start + 1
+            if gap_length > MOTION_MAX_PREDICTION_GAP:
+                continue
+            before = valid_indices[valid_indices < gap_start]
+            after = valid_indices[valid_indices > gap_end]
+            target_frames = np.arange(gap_start, gap_end + 1)
+            if len(before) and len(after):
+                support_indices = np.concatenate((before[-3:], after[:3]))
+                support_x = support_indices.astype(np.float64)
+                if len(support_indices) >= 2:
+                    for axis in range(3):
+                        support_y = points[support_indices, joint_id, axis]
+                        try:
+                            interpolator = PchipInterpolator(support_x, support_y)
+                            output[target_frames, joint_id, axis] = interpolator(target_frames)
+                        except ValueError:
+                            output[target_frames, joint_id, axis] = np.interp(
+                                target_frames, support_x, support_y
+                            )
+            elif len(before) >= 2:
+                first, second = before[-2], before[-1]
+                for axis in range(3):
+                    first_value = points[first, joint_id, axis]
+                    second_value = points[second, joint_id, axis]
+                    slope = (second_value - first_value) / max(1, second - first)
+                    output[target_frames, joint_id, axis] = second_value + slope * (target_frames - second)
+            elif len(after) >= 2:
+                first, second = after[0], after[1]
+                for axis in range(3):
+                    first_value = points[first, joint_id, axis]
+                    second_value = points[second, joint_id, axis]
+                    slope = (second_value - first_value) / max(1, second - first)
+                    output[target_frames, joint_id, axis] = first_value + slope * (target_frames - first)
+            predicted[target_frames, joint_id] = np.isfinite(output[target_frames, joint_id]).all(axis=1)
+
+        finite = np.isfinite(output[:, joint_id]).all(axis=1)
+        if finite.sum() < 4:
+            continue
+        for axis in range(3):
+            values = output[:, joint_id, axis]
+            valid_finite = np.isfinite(values)
+            if valid_finite.sum() < 4:
+                continue
+            filled = np.interp(frame_axis, frame_axis[valid_finite], values[valid_finite])
+            smooth = savgol_filter(
+                filled,
+                window_length=effective_window,
+                polyorder=min(2, effective_window - 1),
+                mode="interp",
+            )
+            values[valid_finite] = smooth[valid_finite]
+            output[:, joint_id, axis] = values
+    return output, predicted
+
+
+MOTION_SIDE_LIMB_CHAINS = {
+    "side_left": {
+        "arm": {"near": (11, 13, 15), "far": (12, 14, 16)},
+        "leg": {"near": (23, 25, 27, 29, 31), "far": (24, 26, 28, 30, 32)},
+    },
+    "side_right": {
+        "arm": {"near": (12, 14, 16), "far": (11, 13, 15)},
+        "leg": {"near": (24, 26, 28, 30, 32), "far": (23, 25, 27, 29, 31)},
+    },
+}
+
+
+def _predict_side_view_far_limbs(
+    points: np.ndarray,
+    visibility: np.ndarray,
+    predicted: np.ndarray,
+    view: str,
+    exercise: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Predict occluded far-side limb chains by reflecting visible limbs."""
+    chains = MOTION_SIDE_LIMB_CHAINS.get(view)
+    if exercise != "pushup" or not chains:
+        return points, predicted
+    output = points.copy()
+    predicted_output = predicted.copy()
+    for frame_index in range(len(output)):
+        left_shoulder = output[frame_index, 11]
+        right_shoulder = output[frame_index, 12]
+        if not np.isfinite(left_shoulder).all() or not np.isfinite(right_shoulder).all():
+            continue
+        lateral = right_shoulder - left_shoulder
+        lateral_norm = float(np.linalg.norm(lateral))
+        if lateral_norm < 1e-6:
+            continue
+        lateral = lateral / lateral_norm
+
+        def reflect(vector: np.ndarray) -> np.ndarray:
+            return vector - 2.0 * float(np.dot(vector, lateral)) * lateral
+
+        for chain in chains.values():
+            near = chain["near"]
+            far = chain["far"]
+            near_visible = all(
+                visibility[frame_index, joint_id] >= MOTION_HIGH_CONFIDENCE
+                and np.isfinite(output[frame_index, joint_id]).all()
+                for joint_id in near
+            )
+            far_occluded = any(
+                visibility[frame_index, joint_id] < MOTION_HIGH_CONFIDENCE
+                for joint_id in far[1:]
+            )
+            far_anchor = output[frame_index, far[0]]
+            if not near_visible or not far_occluded or not np.isfinite(far_anchor).all():
+                continue
+            previous_near = output[frame_index, near[0]]
+            previous_far = far_anchor
+            for near_id, far_id in zip(near[1:], far[1:]):
+                offset = output[frame_index, near_id] - previous_near
+                output[frame_index, far_id] = previous_far + reflect(offset)
+                predicted_output[frame_index, far_id] = True
+                previous_near = output[frame_index, near_id]
+                previous_far = output[frame_index, far_id]
+    return output, predicted_output
+
+
+def _bone_length_targets(
+    points: np.ndarray,
+    visibility: np.ndarray,
+    predicted: np.ndarray,
+) -> dict[tuple[int, int], float]:
+    targets: dict[tuple[int, int], float] = {}
+    for parent, child in MOTION_RIGID_BONES:
+        lengths = []
+        for frame_index in range(len(points)):
+            if (
+                visibility[frame_index, parent] < MOTION_HIGH_CONFIDENCE
+                or visibility[frame_index, child] < MOTION_HIGH_CONFIDENCE
+                or predicted[frame_index, parent]
+                or predicted[frame_index, child]
+            ):
+                continue
+            first = points[frame_index, parent]
+            second = points[frame_index, child]
+            if not np.isfinite(first).all() or not np.isfinite(second).all():
+                continue
+            lengths.append(float(np.linalg.norm(second - first)))
+        if lengths:
+            targets[(parent, child)] = float(np.median(lengths))
+    return targets
+
+
+def _apply_bone_length_constraints(
+    points: np.ndarray,
+    visibility: np.ndarray,
+    targets: dict[tuple[int, int], float],
+    predicted: np.ndarray,
+) -> np.ndarray:
+    output = points.copy()
+    for frame_index in range(len(output)):
+        for parent, child in MOTION_RIGID_BONES:
+            target = targets.get((parent, child))
+            parent_visibility = visibility[frame_index, parent]
+            child_visibility = visibility[frame_index, child]
+            if not target or min(parent_visibility, child_visibility) < MOTION_VISIBLE_MIN:
+                continue
+            parent_point = output[frame_index, parent]
+            child_point = output[frame_index, child]
+            if not np.isfinite(parent_point).all() or not np.isfinite(child_point).all():
+                continue
+            vector = child_point - parent_point
+            current = float(np.linalg.norm(vector))
+            if current < 1e-6:
+                continue
+            is_predicted = bool(predicted[frame_index, parent] or predicted[frame_index, child])
+            if is_predicted or min(parent_visibility, child_visibility) < MOTION_HIGH_CONFIDENCE:
+                max_delta = MOTION_BONE_CORRECTION_MAX_M
+                desired = current + float(np.clip(target - current, -max_delta, max_delta)) * 0.5
+            else:
+                desired = target
+            output[frame_index, child] = parent_point + vector * (desired / current)
+    return output
+
+
+def _fit_ground_and_anchor(
+    points: np.ndarray,
+    visibility: np.ndarray,
+    predicted: np.ndarray,
+    exercise: str,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Rotate into the support plane and hold a stable ground anchor."""
+    support_indices = MOTION_FOOT_INDICES
+    if exercise == "pushup":
+        support_indices = tuple(dict.fromkeys((*MOTION_HAND_INDICES, *MOTION_FOOT_INDICES)))
+    support_cloud = []
+    lateral_vectors = []
+    for frame_index in range(len(points)):
+        for joint_id in support_indices:
+            if (
+                visibility[frame_index, joint_id] >= MOTION_HIGH_CONFIDENCE
+                and not predicted[frame_index, joint_id]
+                and np.isfinite(points[frame_index, joint_id]).all()
+            ):
+                support_cloud.append(points[frame_index, joint_id])
+        for left_id, right_id in ((27, 28), (29, 30)):
+            if (
+                visibility[frame_index, left_id] >= MOTION_HIGH_CONFIDENCE
+                and visibility[frame_index, right_id] >= MOTION_HIGH_CONFIDENCE
+                and not predicted[frame_index, left_id]
+                and not predicted[frame_index, right_id]
+                and np.isfinite(points[frame_index, left_id]).all()
+                and np.isfinite(points[frame_index, right_id]).all()
+            ):
+                lateral_vectors.append(points[frame_index, right_id] - points[frame_index, left_id])
+
+    raw_up = np.asarray([0.0, -1.0, 0.0], dtype=np.float64)
+    raw_x = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+    y_axis = None
+    if len(support_cloud) >= 6:
+        cloud = np.asarray(support_cloud, dtype=np.float64)
+        center = np.median(cloud, axis=0)
+        _, _, vh = np.linalg.svd(cloud - center, full_matrices=False)
+        candidate = _unit_vector(vh[-1])
+        if candidate is not None:
+            if float(np.dot(candidate, raw_up)) < 0:
+                candidate = -candidate
+            tilt = math.acos(min(1.0, max(-1.0, float(np.dot(candidate, raw_up)))))
+            if tilt <= math.radians(8.0):
+                y_axis = candidate
+    if y_axis is None:
+        center = np.median(np.asarray(support_cloud), axis=0) if support_cloud else np.zeros(3, dtype=np.float64)
+        y_axis = raw_up
+
+    lateral = np.mean(np.asarray(lateral_vectors), axis=0) if lateral_vectors else raw_x
+    lateral = lateral - float(np.dot(lateral, y_axis)) * y_axis
+    candidate_x = _unit_vector(lateral)
+    if candidate_x is None:
+        candidate_x = raw_x - float(np.dot(raw_x, y_axis)) * y_axis
+        candidate_x = _unit_vector(candidate_x)
+    x_axis = candidate_x
+    if x_axis is not None:
+        lateral_tilt = math.acos(min(1.0, max(-1.0, abs(float(np.dot(x_axis, raw_x))))))
+        if lateral_tilt > math.radians(18.0):
+            x_axis = _unit_vector(raw_x - float(np.dot(raw_x, y_axis)) * y_axis)
+    if x_axis is None:
+        x_axis = raw_x
+    z_axis = _unit_vector(np.cross(x_axis, y_axis))
+    if z_axis is None:
+        z_axis = np.asarray([0.0, 0.0, 1.0])
+    corrected_x = _unit_vector(np.cross(y_axis, z_axis))
+    if corrected_x is not None:
+        x_axis = corrected_x
+    axes = np.stack([x_axis, y_axis, z_axis], axis=0)
+    rotated = (points - center) @ axes.T
+
+    support_centers: list[np.ndarray] = []
+    support_minima: list[float] = []
+    frame_valid: list[bool] = []
+    for frame_index in range(len(rotated)):
+        valid_points = [
+            rotated[frame_index, joint_id]
+            for joint_id in support_indices
+            if visibility[frame_index, joint_id] >= MOTION_HIGH_CONFIDENCE
+            and not predicted[frame_index, joint_id]
+            and np.isfinite(rotated[frame_index, joint_id]).all()
+        ]
+        if valid_points:
+            support_centers.append(np.mean(np.asarray(valid_points), axis=0))
+            support_minima.append(float(np.min([point[1] for point in valid_points])))
+            frame_valid.append(True)
+        else:
+            support_centers.append(np.zeros(3, dtype=np.float64))
+            support_minima.append(np.nan)
+            frame_valid.append(False)
+
+    anchor = np.zeros(3, dtype=np.float64)
+    has_anchor = False
+    for frame_index in range(len(rotated)):
+        if frame_valid[frame_index]:
+            candidate_anchor = np.asarray(
+                [support_centers[frame_index][0], support_minima[frame_index], support_centers[frame_index][2]],
+                dtype=np.float64,
+            )
+            if not has_anchor:
+                anchor = candidate_anchor
+                has_anchor = True
+            else:
+                delta = candidate_anchor - anchor
+                distance = float(np.linalg.norm(delta))
+                if distance > MOTION_ANCHOR_MAX_JUMP_M:
+                    # 单帧跳变过大时按上限跟随，过滤关键点闪跳
+                    anchor = anchor + delta * (MOTION_ANCHOR_MAX_JUMP_M / distance)
+                elif distance >= MOTION_ANCHOR_DEAD_BAND_M:
+                    # 死区内保持锚点，死区外立即跟随，避免真实下蹲被限速拖慢
+                    anchor = candidate_anchor
+        rotated[frame_index, :, 0] -= anchor[0]
+        rotated[frame_index, :, 1] -= anchor[1]
+        rotated[frame_index, :, 2] -= anchor[2]
+
+    return rotated, {
+        "plane_normal": [round(float(value), 6) for value in y_axis],
+        "lateral_axis": [round(float(value), 6) for value in x_axis],
+        "depth_axis": [round(float(value), 6) for value in z_axis],
+        "support_mode": "hands_and_feet" if exercise == "pushup" else "feet",
+        "support_points": len(support_cloud),
+        "valid_support_frames": int(sum(frame_valid)),
+        "anchor_dead_band_m": MOTION_ANCHOR_DEAD_BAND_M,
+        "anchor_max_jump_m": MOTION_ANCHOR_MAX_JUMP_M,
+    }
+
+
+def build_motion_payload(
+    analysis_dir: Path,
+    analysis: dict[str, Any],
+    timeline: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build a stabilized, foot-anchored 2D/3D motion track for the report."""
+    clip_id = str(analysis.get("clip_id") or "")
+    if not clip_id:
+        return None
+    clip_dir = analysis_dir / clip_id
+    body_path = clip_dir / "angles" / "landmarks_body_frame.json"
+    if not body_path.is_file():
+        return None
+    body_records = load_json(body_path)
+    if not isinstance(body_records, list) or not body_records:
+        return None
+
+    pose_by_frame: dict[int, dict[str, Any]] = {}
+    pose_path = clip_dir / "angles" / "landmarks.json"
+    if pose_path.is_file():
+        pose_records = load_json(pose_path)
+        if isinstance(pose_records, list):
+            for record in pose_records:
+                frame_id = as_int(record.get("frame_id"))
+                if frame_id is not None:
+                    pose_by_frame[frame_id] = record
+
+    def parse_world(value: Any) -> np.ndarray | None:
+        if not isinstance(value, list) or len(value) < 33:
+            return None
+        points = np.full((33, 3), np.nan, dtype=np.float64)
+        for index, point in enumerate(value[:33]):
+            if not isinstance(point, list) or len(point) < 3:
+                continue
+            values = [as_float(point[axis]) for axis in range(3)]
+            if all(item is not None for item in values):
+                points[index] = values
+        return points
+
+    def parse_normalized(value: Any) -> np.ndarray | None:
+        if not isinstance(value, list) or len(value) < 33:
+            return None
+        points = np.full((33, 2), np.nan, dtype=np.float64)
+        for index, point in enumerate(value[:33]):
+            if not isinstance(point, list) or len(point) < 2:
+                continue
+            values = [as_float(point[axis]) for axis in range(2)]
+            if all(item is not None for item in values):
+                points[index] = values
+        return points
+
+    frame_count = len(body_records)
+    world = np.full((frame_count, 33, 3), np.nan, dtype=np.float64)
+    normalized = np.full((frame_count, 33, 2), np.nan, dtype=np.float64)
+    visibility = np.zeros((frame_count, 33), dtype=np.float64)
+    times = np.zeros(frame_count, dtype=np.float64)
+    detections = np.zeros(frame_count, dtype=bool)
+    reps_by_frame: list[int | None] = [None] * frame_count
+    used_world = False
+    used_body = False
+
+    fps = as_float(analysis.get("fps")) or 30.0
+    rep_payload = [
+        {
+            "rep_id": as_int(rep.get("rep_id")),
+            "start_s": rounded(as_float(rep.get("start_s"))) or 0.0,
+            "end_s": rounded(as_float(rep.get("end_s"))) or 0.0,
+            "bottom_s": rounded(as_float(rep.get("bottom_s"))) or 0.0,
+        }
+        for rep in timeline.get("reps") or []
+        if as_int(rep.get("rep_id")) is not None
+    ]
+    rep_payload.sort(key=lambda rep: (rep["start_s"], rep["end_s"]))
+
+    for index, body_record in enumerate(body_records):
+        frame_id = as_int(body_record.get("frame_id"))
+        if frame_id is None:
+            frame_id = index
+        timestamp_ms = as_float(body_record.get("timestamp_ms"))
+        time_s = timestamp_ms / 1000.0 if timestamp_ms is not None else frame_id / fps
+        times[index] = time_s
+        reps_by_frame[index] = next(
+            (
+                rep["rep_id"]
+                for rep in rep_payload
+                if rep["start_s"] <= time_s <= rep["end_s"]
+            ),
+            None,
+        )
+        pose_record = pose_by_frame.get(frame_id) or {}
+        detections[index] = bool(body_record.get("detected") or pose_record.get("detected"))
+        visibility_raw = pose_record.get("visibility") or body_record.get("visibility") or []
+        if isinstance(visibility_raw, list):
+            for joint_id, item in enumerate(visibility_raw[:33]):
+                value = as_float(item)
+                visibility[index, joint_id] = 1.0 if value is None else min(1.0, max(0.0, value))
+
+        world_raw = pose_record.get("landmarks_world")
+        parsed_world = parse_world(world_raw)
+        if parsed_world is not None:
+            world[index] = parsed_world
+            used_world = True
+        else:
+            parsed_body = parse_world(body_record.get("landmarks_body_frame"))
+            if parsed_body is not None:
+                world[index] = parsed_body
+                used_body = True
+        parsed_normalized = parse_normalized(pose_record.get("landmarks_normalized"))
+        if parsed_normalized is not None:
+            normalized[index] = parsed_normalized
+
+    smoothed, predicted = _smooth_landmarks(world, visibility)
+    smoothed, predicted = _predict_side_view_far_limbs(
+        smoothed,
+        visibility,
+        predicted,
+        str(analysis.get("view") or "unknown"),
+        str(analysis.get("exercise") or "squat"),
+    )
+    bone_targets = _bone_length_targets(smoothed, visibility, predicted)
+    constrained = _apply_bone_length_constraints(smoothed, visibility, bone_targets, predicted)
+    stabilized, ground_metadata = _fit_ground_and_anchor(
+        constrained,
+        visibility,
+        predicted,
+        str(analysis.get("exercise") or "squat"),
+    )
+    process_metrics = build_process_metrics(
+        stabilized,
+        visibility,
+        predicted,
+        times,
+        reps_by_frame,
+        rep_payload,
+        fps=fps,
+        exercise=str(analysis.get("exercise") or "squat"),
+        view=str(analysis.get("view") or "unknown"),
+    )
+
+    stride = max(1, int(round(fps / 15.0)))
+    keep_indices = set(range(0, frame_count, stride))
+    keep_indices.add(frame_count - 1)
+    for rep in rep_payload:
+        for key in ("start_s", "bottom_s", "end_s"):
+            index = int(round(float(rep[key]) * fps))
+            keep_indices.update(
+                value
+                for value in (index - 1, index, index + 1)
+                if 0 <= value < frame_count
+            )
+
+    frames: list[list[Any]] = []
+    for index in sorted(keep_indices):
+        time_s = float(times[index])
+        rep_id = reps_by_frame[index]
+        points_3d = stabilized[index, MOTION_JOINT_IDS]
+        if not np.isfinite(points_3d).any():
+            frames.append([round(time_s, 4), rep_id, [], [], [], [], []])
+            continue
+        normalized_frame = normalized[index]
+        has_2d = bool(np.isfinite(normalized_frame).any())
+        frames.append(
+            [
+                round(time_s, 4),
+                rep_id,
+                [
+                    round(float(value), 3) if np.isfinite(value) else None
+                    for value in points_3d.reshape(-1)
+                ],
+                [int(round(float(visibility[index, joint_id]) * 255)) for joint_id in MOTION_JOINT_IDS],
+                [
+                    round(float(value), 4) if np.isfinite(value) else None
+                    for value in normalized_frame.reshape(-1)
+                ] if has_2d else [],
+                [int(round(float(value) * 255)) for value in visibility[index]] if has_2d else [],
+                [bool(value) for value in predicted[index, MOTION_JOINT_IDS]],
+            ]
+        )
+
+    duration_s = max(
+        float(np.nanmax(times)) if frame_count else 0.0,
+        as_float(timeline.get("duration_s")) or 0.0,
+    )
+    if used_world and used_body:
+        source = "mixed_world_stabilized"
+    elif used_world:
+        source = "mediapipe_world_stabilized"
+    else:
+        source = "mediapipe_body_frame_stabilized"
+    return {
+        "schema_version": "vls-motion-trace-v5",
+        "source": source,
+        "fps": round(fps, 3),
+        "duration_s": round(duration_s, 4),
+        "joints": list(MOTION_JOINT_IDS),
+        "bones": [list(bone) for bone in MOTION_BONES],
+        "video_joints": list(range(33)),
+        "video_connections": [list(connection) for connection in MOTION_VIDEO_CONNECTIONS],
+        "coordinate_system": {
+            "name": "foot_ground",
+            "unit": "m",
+            "origin": "support_foot_center",
+            "axes": {"x": "left_right", "y": "up", "z": "front_back"},
+            "floor_y": 0.0,
+        },
+        "stabilization": {
+            "smoothing": "savitzky_golay",
+            "window": MOTION_SMOOTH_WINDOW,
+            "max_interpolation_gap": MOTION_MAX_INTERPOLATION_GAP,
+            "max_prediction_gap": MOTION_MAX_PREDICTION_GAP,
+            "visible_threshold": MOTION_VISIBLE_MIN,
+            "high_confidence_threshold": MOTION_HIGH_CONFIDENCE,
+            "bone_correction_max_m": MOTION_BONE_CORRECTION_MAX_M,
+            "rigid_bones": [list(bone) for bone in MOTION_RIGID_BONES],
+            "bone_targets": {
+                f"{parent}-{child}": round(float(length), 6)
+                for (parent, child), length in bone_targets.items()
+            },
+            **ground_metadata,
+        },
+        "anchor": {
+            "mode": "support_ground_follow",
+            "dead_band_m": MOTION_ANCHOR_DEAD_BAND_M,
+            "max_jump_m": MOTION_ANCHOR_MAX_JUMP_M,
+        },
+        "process_metrics": process_metrics,
+        "reps": rep_payload,
+        "frames": frames,
+    }
+
+
 def render_card_frames(
     feedback: dict[str, Any],
     clip_meta: dict[str, Any],
@@ -838,12 +1505,1215 @@ def render_card_frames(
     return generated, warnings
 
 
+
+MOTION_TRACE_SCRIPT = r"""
+(() => {
+  const data = __MOTION_DATA__;
+  window.__VIGORYSYNC_PROCESS_METRICS__ = data?.process_metrics || null;
+  const canvas = document.getElementById('motion-canvas');
+  const stage = document.getElementById('motion-stage');
+  const empty = document.getElementById('motion-empty');
+  const clock = document.getElementById('motion-time');
+  const resetButton = document.getElementById('motion-reset');
+  const predictionNote = document.getElementById('motion-prediction');
+  const media = document.getElementById('player');
+  const videoCanvas = document.getElementById('skeleton-canvas');
+  const videoFrame = videoCanvas?.parentElement || null;
+  const videoCtx = videoCanvas?.getContext('2d') || null;
+  if (!canvas) return;
+
+  const showEmpty = (message) => {
+    if (empty) {
+      empty.textContent = message;
+      empty.hidden = false;
+    }
+  };
+  if (!data || !Array.isArray(data.frames) || !data.frames.length) {
+    showEmpty('本次没有可用的 3D 姿态数据');
+    if (clock) clock.textContent = '无轨迹';
+    canvas.setAttribute('aria-hidden', 'true');
+    return;
+  }
+
+  const ctx = canvas.getContext('2d');
+  const jointOrder = data.joints.map((id) => Number(id));
+  const jointIndex = new Map(jointOrder.map((id, index) => [id, index]));
+  const frames = data.frames;
+  const reps = Array.isArray(data.reps) ? data.reps : [];
+  const colors = {
+    cyan: [134, 232, 255],
+    acid: [217, 255, 67],
+    ink: [241, 240, 231],
+    signal: [255, 100, 77]
+  };
+  const jointNames = {
+    0: '头部', 2: '左眼', 5: '右眼', 7: '左耳', 8: '右耳',
+    11: '左肩', 12: '右肩', 13: '左肘', 14: '右肘', 15: '左手', 16: '右手',
+    23: '左髋', 24: '右髋', 25: '左膝', 26: '右膝', 27: '左踝', 28: '右踝',
+    29: '左脚跟', 30: '右脚跟', 31: '左脚尖', 32: '右脚尖'
+  };
+  const videoConnections = Array.isArray(data.video_connections) ? data.video_connections : [];
+  const videoLeftJoints = new Set([2, 7, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]);
+  const videoRightJoints = new Set([5, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]);
+  const poseLeftJoints = new Set([2, 7, 11, 13, 15, 23, 25, 27, 29, 31]);
+  const poseRightJoints = new Set([5, 8, 12, 14, 16, 24, 26, 28, 30, 32]);
+  const coordinateBox = buildCoordinateBox();
+
+  let width = 0;
+  let height = 0;
+  let dpr = 1;
+  let yaw = -0.5;
+  let pitch = 0.1;
+  let zoom = 1;
+  let dirty = true;
+  let lastTime = -1;
+  let drag = null;
+  const cameraDistance = 2.8;
+  const targetHeight = 0.92;
+
+  const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+  const rgba = (rgb, alpha) => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`;
+  const jointColor = (jointId) => poseLeftJoints.has(Number(jointId)) ? colors.cyan : (poseRightJoints.has(Number(jointId)) ? colors.acid : colors.ink);
+
+  function resizeVideoOverlay() {
+    if (!videoCanvas || !videoCtx || !videoFrame) return;
+    const rect = videoFrame.getBoundingClientRect();
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    videoCanvas.width = Math.max(1, Math.round(rect.width * dpr));
+    videoCanvas.height = Math.max(1, Math.round(rect.height * dpr));
+    videoCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function resize() {
+    if (!stage) return;
+    const rect = stage.getBoundingClientRect();
+    width = Math.max(240, rect.width);
+    height = Math.max(280, rect.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    resizeVideoOverlay();
+    dirty = true;
+  }
+
+  function project(point) {
+    const x = Number(point[0]) || 0;
+    const y = (Number(point[1]) || 0) - targetHeight;
+    const z = Number(point[2]) || 0;
+    const cy = Math.cos(yaw);
+    const sy = Math.sin(yaw);
+    const x1 = x * cy - z * sy;
+    const z1 = x * sy + z * cy;
+    const cp = Math.cos(pitch);
+    const sp = Math.sin(pitch);
+    const y1 = y * cp - z1 * sp;
+    const z2 = y * sp + z1 * cp;
+    const depth = z2 + cameraDistance;
+    const scale = Math.min(width, height) * 1.22 * zoom;
+    const perspective = scale / Math.max(0.35, depth);
+    return {
+      x: width * 0.5 + x1 * perspective,
+      y: height * 0.52 - y1 * perspective,
+      z: depth
+    };
+  }
+
+  function drawLine(first, second, color, alpha, lineWidth, dash = []) {
+    ctx.save();
+    ctx.strokeStyle = rgba(color, alpha);
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.setLineDash(dash);
+    ctx.beginPath();
+    ctx.moveTo(first.x, first.y);
+    ctx.lineTo(second.x, second.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function buildCoordinateBox() {
+    let maxX = 0.5;
+    let maxY = 1.2;
+    let maxZ = 0.5;
+    for (const frame of frames) {
+      const points = frame[2] || [];
+      for (let jointId = 0; jointId < jointOrder.length; jointId += 1) {
+        const offset = jointId * 3;
+        if (offset + 2 >= points.length) continue;
+        const x = Number(points[offset]);
+        const y = Number(points[offset + 1]);
+        const z = Number(points[offset + 2]);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+        maxX = Math.max(maxX, Math.abs(x));
+        maxY = Math.max(maxY, y);
+        maxZ = Math.max(maxZ, Math.abs(z));
+      }
+    }
+    const tick = 0.5;
+    const xExtent = Math.max(0.5, Math.ceil((maxX + 0.12) / tick) * tick);
+    const zExtent = Math.max(0.5, Math.ceil((maxZ + 0.12) / tick) * tick);
+    const yMax = Math.max(2.0, Math.ceil((maxY + 0.2) / tick) * tick);
+    return { xMin: -xExtent, xMax: xExtent, yMin: 0, yMax, zMin: -zExtent, zMax: zExtent, tick };
+  }
+
+  function tickValues(minimum, maximum, step) {
+    const values = [];
+    for (let value = Math.ceil(minimum / step) * step; value <= maximum + 1e-6; value += step) {
+      values.push(Math.abs(value) < 1e-8 ? 0 : value);
+    }
+    return values;
+  }
+
+  function formatMeters(value) {
+    return `${Number(value).toFixed(1)}m`;
+  }
+
+  function drawCoordinateBox() {
+    const box = coordinateBox;
+    const xticks = tickValues(box.xMin, box.xMax, box.tick);
+    const yticks = tickValues(box.yMin, box.yMax, box.tick);
+    const zticks = tickValues(box.zMin, box.zMax, box.tick);
+
+    for (const x of xticks) {
+      drawLine(project([x, box.yMin, box.zMin]), project([x, box.yMin, box.zMax]), colors.ink, 0.09, 1);
+      drawLine(project([x, box.yMin, box.zMin]), project([x, box.yMax, box.zMin]), colors.ink, 0.07, 1);
+    }
+    for (const z of zticks) {
+      drawLine(project([box.xMin, box.yMin, z]), project([box.xMax, box.yMin, z]), colors.ink, 0.09, 1);
+      drawLine(project([box.xMin, box.yMin, z]), project([box.xMin, box.yMax, z]), colors.ink, 0.07, 1);
+    }
+    for (const y of yticks) {
+      drawLine(project([box.xMin, y, box.zMin]), project([box.xMax, y, box.zMin]), colors.ink, 0.07, 1);
+      drawLine(project([box.xMin, y, box.zMin]), project([box.xMin, y, box.zMax]), colors.ink, 0.07, 1);
+    }
+
+    drawLine(project([box.xMin, box.yMin, box.zMax]), project([box.xMax, box.yMin, box.zMax]), colors.signal, 0.78, 1.8);
+    drawLine(project([box.xMax, box.yMin, box.zMin]), project([box.xMax, box.yMin, box.zMax]), colors.cyan, 0.78, 1.8);
+    drawLine(project([box.xMin, box.yMin, box.zMin]), project([box.xMin, box.yMax, box.zMin]), colors.acid, 0.78, 1.8);
+    drawLine(project([box.xMin, box.yMin, box.zMax]), project([box.xMin, box.yMax, box.zMax]), colors.ink, 0.2, 1);
+    drawLine(project([box.xMax, box.yMin, box.zMin]), project([box.xMax, box.yMax, box.zMin]), colors.ink, 0.2, 1);
+    drawLine(project([box.xMin, box.yMax, box.zMin]), project([box.xMax, box.yMax, box.zMin]), colors.ink, 0.2, 1);
+
+    ctx.save();
+    ctx.font = '8px ui-monospace, Consolas, monospace';
+    ctx.fillStyle = 'rgba(241,240,231,.48)';
+    ctx.textAlign = 'right';
+    for (const y of yticks) {
+      const point = project([box.xMin, y, box.zMin]);
+      ctx.fillText(formatMeters(y), point.x - 5, point.y + 3);
+    }
+    ctx.textAlign = 'center';
+    for (const x of xticks) {
+      const point = project([x, box.yMin, box.zMax]);
+      ctx.fillText(formatMeters(x), point.x, point.y + 13);
+    }
+    ctx.textAlign = 'left';
+    for (const z of zticks) {
+      const point = project([box.xMax, box.yMin, z]);
+      ctx.fillText(formatMeters(z), point.x + 5, point.y + 12);
+    }
+    ctx.font = '700 8px ui-monospace, Consolas, monospace';
+    const xLabel = project([(box.xMin + box.xMax) / 2, box.yMin, box.zMax]);
+    const yLabel = project([box.xMin, box.yMax, box.zMin]);
+    const zLabel = project([box.xMax, box.yMin, (box.zMin + box.zMax) / 2]);
+    ctx.fillStyle = rgba(colors.signal, 0.9);
+    ctx.fillText('X 左右 / m', xLabel.x, xLabel.y + 25);
+    ctx.fillStyle = rgba(colors.acid, 0.9);
+    ctx.fillText('Y 高度 / m', yLabel.x - 8, yLabel.y - 8);
+    ctx.fillStyle = rgba(colors.cyan, 0.9);
+    ctx.fillText('Z 前后 / m', zLabel.x + 5, zLabel.y + 24);
+    ctx.fillStyle = 'rgba(241,240,231,.32)';
+    ctx.font = '9px ui-monospace, Consolas, monospace';
+    ctx.fillText('FOOT GROUND FRAME · Y=0 · m', 12, height - 12);
+    ctx.restore();
+  }
+
+  function nearestFrameIndex(time) {
+    let low = 0;
+    let high = frames.length - 1;
+    let found = -1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (frames[middle][0] <= time) {
+        found = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return found;
+  }
+
+  function nearestFrame(time) {
+    const index = nearestFrameIndex(time);
+    return index >= 0 ? frames[index] : null;
+  }
+
+  function samplePose(time) {
+    const lowerIndex = nearestFrameIndex(time);
+    if (lowerIndex < 0) return null;
+    const lower = frames[lowerIndex];
+    const upper = frames[lowerIndex + 1] || null;
+    const lowerPoints = lower[2] || [];
+    const upperPoints = upper && upper[2] ? upper[2] : [];
+    let points = lowerPoints;
+    let visibility = lower[3] || [];
+    let predicted = lower[6] || [];
+    let factor = 0;
+    if (lowerPoints.length && upperPoints.length && upper[0] > lower[0]) {
+      factor = clamp((time - lower[0]) / (upper[0] - lower[0]), 0, 1);
+      points = lowerPoints.map((value, index) => {
+        const first = Number(value);
+        const second = Number(upperPoints[index]);
+        if (Number.isFinite(first) && Number.isFinite(second)) return first + (second - first) * factor;
+        return Number.isFinite(first) ? first : second;
+      });
+      const upperVisibility = upper[3] || [];
+      visibility = points.map((_, index) => {
+        const a = Number(lower[3]?.[index] ?? 255);
+        const b = Number(upperVisibility[index] ?? 255);
+        return a + (b - a) * factor;
+      });
+      const upperPredicted = upper[6] || [];
+      predicted = points.map((_, index) => Boolean(predicted[index] || upperPredicted[index]));
+    } else if (!lowerPoints.length && upperPoints.length && upper[0] - lower[0] < 0.18) {
+      points = upperPoints;
+      visibility = upper[3] || [];
+      predicted = upper[6] || [];
+    } else if (lowerPoints.length && !upperPoints.length && time - lower[0] > 0.18) {
+      return null;
+    }
+    if (!points.length) return null;
+    const byId = new Map();
+    for (const jointId of jointOrder) {
+      const index = jointIndex.get(jointId);
+      if (index === undefined) continue;
+      const offset = index * 3;
+      if (offset + 2 >= points.length) continue;
+      const x = points[offset];
+      const y = points[offset + 1];
+      const z = points[offset + 2];
+      if (x === null || y === null || z === null || !Number.isFinite(Number(x)) || !Number.isFinite(Number(y)) || !Number.isFinite(Number(z))) continue;
+      byId.set(jointId, {
+        point: [Number(x), Number(y), Number(z)],
+        visibility: Number(visibility[index] ?? 255),
+        predicted: Boolean(predicted[index])
+      });
+    }
+    return byId.size ? byId : null;
+  }
+
+  function sampleVideoPose(time) {
+    const lowerIndex = nearestFrameIndex(time);
+    if (lowerIndex < 0) return null;
+    const lower = frames[lowerIndex];
+    const upper = frames[lowerIndex + 1] || null;
+    const lowerPoints = lower[4] || [];
+    const upperPoints = upper && upper[4] ? upper[4] : [];
+    if (lowerPoints.length !== 66 && upperPoints.length !== 66) return null;
+    let points = lowerPoints.length === 66 ? lowerPoints.slice() : upperPoints.slice();
+    let visibility = (lowerPoints.length === 66 ? lower[5] : upper[5]) || [];
+    if (lowerPoints.length === 66 && upperPoints.length === 66 && upper[0] > lower[0]) {
+      const factor = clamp((time - lower[0]) / (upper[0] - lower[0]), 0, 1);
+      points = lowerPoints.map((value, index) => value + (upperPoints[index] - value) * factor);
+      const lowerVisibility = lower[5] || [];
+      const upperVisibility = upper[5] || [];
+      visibility = points.map((_, index) => {
+        const first = Number(lowerVisibility[index] ?? 255);
+        const second = Number(upperVisibility[index] ?? 255);
+        return first + (second - first) * factor;
+      });
+    }
+    return { points, visibility };
+  }
+
+  function videoJointColor(jointId) {
+    if (videoLeftJoints.has(jointId)) return colors.cyan;
+    if (videoRightJoints.has(jointId)) return colors.acid;
+    return colors.ink;
+  }
+
+  function drawVideoSkeleton(time) {
+    if (!videoCtx || !videoFrame || !media?.videoWidth) return;
+    const rect = videoFrame.getBoundingClientRect();
+    videoCtx.clearRect(0, 0, rect.width, rect.height);
+    const sampled = sampleVideoPose(time);
+    if (!sampled) return;
+    const videoWidth = Number(media.videoWidth);
+    const videoHeight = Number(media.videoHeight);
+    const scale = Math.min(rect.width / videoWidth, rect.height / videoHeight);
+    const drawWidth = videoWidth * scale;
+    const drawHeight = videoHeight * scale;
+    const offsetX = (rect.width - drawWidth) / 2;
+    const offsetY = (rect.height - drawHeight) / 2;
+    const points = sampled.points;
+    const visibility = sampled.visibility;
+    const position = (jointId) => ({
+      x: offsetX + Number(points[jointId * 2] || 0) * drawWidth,
+      y: offsetY + Number(points[jointId * 2 + 1] || 0) * drawHeight
+    });
+    videoCtx.save();
+    videoCtx.lineCap = 'round';
+    videoCtx.lineJoin = 'round';
+    for (const [firstId, secondId] of videoConnections) {
+      const minimumVisibility = Math.min(Number(visibility[firstId] ?? 0), Number(visibility[secondId] ?? 0));
+      if (minimumVisibility < 90) continue;
+      const first = position(firstId);
+      const second = position(secondId);
+      videoCtx.strokeStyle = rgba(colors.ink, minimumVisibility < 166 ? 0.45 : 0.82);
+      videoCtx.lineWidth = minimumVisibility < 166 ? 1.1 : 1.4;
+      videoCtx.beginPath();
+      videoCtx.moveTo(first.x, first.y);
+      videoCtx.lineTo(second.x, second.y);
+      videoCtx.stroke();
+    }
+    for (let jointId = 0; jointId < 33; jointId += 1) {
+      const jointVisibility = Number(visibility[jointId] ?? 0);
+      if (jointVisibility < 90) continue;
+      const point = position(jointId);
+      const color = videoJointColor(jointId);
+      videoCtx.fillStyle = rgba(color, jointVisibility < 166 ? 0.56 : 0.88);
+      videoCtx.beginPath();
+      videoCtx.arc(point.x, point.y, jointId <= 10 ? 1.8 : 2.4, 0, Math.PI * 2);
+      videoCtx.fill();
+    }
+    videoCtx.restore();
+  }
+
+  function currentRep(time) {
+    return reps.find((rep) => time >= Number(rep.start_s) && time <= Number(rep.end_s)) || null;
+  }
+
+  function activeIssueJoints(time) {
+    const active = new Set();
+    for (const card of document.querySelectorAll('.issue-card')) {
+      const start = Number(card.dataset.start);
+      const end = Number(card.dataset.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || time < start || time > end) continue;
+      for (const value of String(card.dataset.joints || '').split(',')) {
+        const jointId = Number(value);
+        if (Number.isFinite(jointId)) active.add(jointId);
+      }
+    }
+    return active;
+  }
+
+  function drawSkeleton(pose, highlighted) {
+    if (!pose) return;
+    const segments = [];
+    for (const [firstId, secondId] of data.bones) {
+      const first = pose.get(Number(firstId));
+      const second = pose.get(Number(secondId));
+      if (!first || !second) continue;
+      const predictedSegment = Boolean(first.predicted || second.predicted);
+      const minimumVisibility = Math.min(first.visibility, second.visibility);
+      if (!predictedSegment && minimumVisibility < 89) continue;
+      const a = project(first.point);
+      const b = project(second.point);
+      segments.push({
+        a,
+        b,
+        firstId: Number(firstId),
+        secondId: Number(secondId),
+        opacity: predictedSegment ? 0.48 : clamp(minimumVisibility / 255, 0.42, 1),
+        predicted: predictedSegment,
+        uncertain: minimumVisibility < 166,
+        highlighted: highlighted.has(Number(firstId)) || highlighted.has(Number(secondId))
+      });
+    }
+    segments.sort((left, right) => (right.a.z + right.b.z) / 2 - (left.a.z + left.b.z) / 2);
+    for (const segment of segments) {
+      if (segment.highlighted) {
+        drawLine(segment.a, segment.b, colors.signal, segment.predicted ? 0.72 : 0.95, 4.2, segment.predicted ? [6, 4] : []);
+        if (!segment.predicted) drawLine(segment.a, segment.b, colors.signal, 0.18, 10);
+      } else if (segment.predicted) {
+        const firstId = Number(segment.firstId);
+        const secondId = Number(segment.secondId);
+        const predictionColor = poseRightJoints.has(firstId) && poseRightJoints.has(secondId)
+          ? colors.acid
+          : (poseLeftJoints.has(firstId) && poseLeftJoints.has(secondId) ? colors.cyan : colors.ink);
+        drawLine(segment.a, segment.b, predictionColor, 0.9, 2.6, [7, 4]);
+      } else if (segment.uncertain) {
+        drawLine(segment.a, segment.b, colors.ink, 0.44, 1.8);
+      } else {
+        drawLine(segment.a, segment.b, colors.ink, 0.2 * segment.opacity, 6);
+        drawLine(segment.a, segment.b, colors.ink, 0.86 * segment.opacity, 2.4);
+      }
+    }
+    const joints = [...pose.entries()]
+      .map(([id, value]) => ({ id, value, projected: project(value.point) }))
+      .filter((item) => item.value.predicted || item.value.visibility >= 89)
+      .sort((left, right) => right.projected.z - left.projected.z);
+    for (const item of joints) {
+      const color = highlighted.has(item.id) ? colors.signal : jointColor(item.id);
+      const radius = highlighted.has(item.id) ? 4.6 : (item.value.predicted ? 2.8 : 3.4);
+      ctx.save();
+      if (item.value.predicted) {
+        ctx.strokeStyle = rgba(color, 0.72);
+        ctx.lineWidth = 1.6;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.arc(item.projected.x, item.projected.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        const visibilityAlpha = clamp(item.value.visibility / 255, 0.45, 1);
+        ctx.fillStyle = rgba(color, item.value.visibility < 166 ? 0.58 : 0.55 + 0.45 * visibilityAlpha);
+        ctx.shadowColor = rgba(color, 0.8);
+        ctx.shadowBlur = highlighted.has(item.id) ? 12 : 6;
+        ctx.beginPath();
+        ctx.arc(item.projected.x, item.projected.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  function draw(time) {
+    lastTime = time;
+    ctx.clearRect(0, 0, width, height);
+    drawCoordinateBox();
+    const pose = samplePose(time);
+    const rep = currentRep(time);
+    if (pose) {
+      if (empty) empty.hidden = true;
+      drawSkeleton(pose, activeIssueJoints(time));
+      const predictedSegments = data.bones.filter(([firstId, secondId]) => {
+        const first = pose.get(Number(firstId));
+        const second = pose.get(Number(secondId));
+        return first && second && (first.predicted || second.predicted);
+      });
+      if (predictionNote) {
+        if (predictedSegments.length) {
+          const labels = predictedSegments.map(([firstId, secondId]) =>
+            `${jointNames[firstId] || `关节${firstId}`}–${jointNames[secondId] || `关节${secondId}`}`
+          );
+          predictionNote.textContent = `遮挡预测：${[...new Set(labels)].join('、')}`;
+          predictionNote.hidden = false;
+        } else {
+          predictionNote.hidden = true;
+          predictionNote.textContent = '';
+        }
+      }
+    } else {
+      showEmpty('本帧未检测到可靠姿态');
+      if (predictionNote) predictionNote.hidden = true;
+    }
+    if (clock) {
+      clock.textContent = `${Number(time).toFixed(2)}s${rep ? ` · REP ${String(rep.rep_id).padStart(2, '0')}` : ''}`;
+    }
+  }
+
+  function animate() {
+    const time = media ? Number(media.currentTime) || 0 : 0;
+    if (dirty || Math.abs(time - lastTime) > 0.0005) {
+      draw(time);
+      drawVideoSkeleton(time);
+      dirty = false;
+    }
+    requestAnimationFrame(animate);
+  }
+
+  canvas.addEventListener('pointerdown', (event) => {
+    drag = { x: event.clientX, y: event.clientY };
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (!drag) return;
+    yaw += (event.clientX - drag.x) * 0.008;
+    pitch = clamp(pitch + (event.clientY - drag.y) * 0.008, -1.15, 1.15);
+    drag = { x: event.clientX, y: event.clientY };
+    dirty = true;
+  });
+  const endDrag = () => { drag = null; };
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    zoom = clamp(zoom * (event.deltaY > 0 ? 0.9 : 1.1), 0.55, 2.2);
+    dirty = true;
+  }, { passive: false });
+  canvas.addEventListener('dblclick', () => {
+    yaw = -0.5;
+    pitch = 0.1;
+    zoom = 1;
+    dirty = true;
+  });
+  resetButton?.addEventListener('click', () => {
+    yaw = -0.5;
+    pitch = 0.1;
+    zoom = 1;
+    dirty = true;
+  });
+  media?.addEventListener('timeupdate', () => { dirty = true; });
+  media?.addEventListener('seeked', () => { dirty = true; });
+  media?.addEventListener('play', () => { dirty = true; });
+  media?.addEventListener('pause', () => { dirty = true; });
+  media?.addEventListener('loadedmetadata', () => { dirty = true; });
+  if (window.ResizeObserver && stage) {
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(stage);
+    if (videoFrame) resizeObserver.observe(videoFrame);
+  } else {
+    window.addEventListener('resize', resize);
+  }
+  resize();
+  animate();
+})();
+"""
+
+
+def build_process_metric_cards(motion: dict[str, Any] | None) -> str:
+    process_metrics = (motion or {}).get("process_metrics") or {}
+    metrics = process_metrics.get("metrics") or {}
+    if not metrics:
+        return (
+            '<div class="process-empty">3D 轨迹可用后，将在这里显示重心、躯干与左右对称性曲线。</div>'
+        )
+    status_class = {
+        "normal": "normal",
+        "attention": "attention",
+        "abnormal": "abnormal",
+        "unavailable": "unavailable",
+    }
+    cards = []
+    for index, metric_id in enumerate(("com_ap_drift", "torso_variability", "symmetry_index"), 1):
+        metric = metrics.get(metric_id) or {}
+        status = str(metric.get("status") or "unavailable")
+        status_label = str(metric.get("status_label") or "数据不足")
+        chart = metric.get("chart") or {}
+        series = chart.get("series") or {}
+        has_series = bool(series.get("t"))
+        live_unit = str(metric.get("unit") or "")
+        live_chart_unit = str(chart.get("y_label") or "")
+        details = []
+        if metric.get("definition"):
+            details.append(f"<p><b>定义：</b>{html.escape(str(metric['definition']))}</p>")
+        if metric.get("threshold_text"):
+            details.append(f"<p><b>分级：</b>{html.escape(str(metric['threshold_text']))}</p>")
+        if metric.get("basis"):
+            details.append(f"<p><b>依据：</b>{html.escape(str(metric['basis']))}</p>")
+        if metric.get("view_note"):
+            details.append(f"<p class=\"process-view-note\">{html.escape(str(metric['view_note']))}</p>")
+        cards.append(
+            f"""
+            <article class="process-metric {status_class.get(status, 'unavailable')}"
+              data-process-metric="{html.escape(metric_id)}"
+              data-live-unit="{html.escape(live_unit)}">
+              <header class="process-metric-head">
+                <div><span class="process-index">0{index}</span><h3>{html.escape(str(metric.get('title') or metric_id))}</h3></div>
+                <span class="process-status {status_class.get(status, 'unavailable')}">{html.escape(status_label)}</span>
+              </header>
+              <div class="process-reading"><strong>{html.escape(str(metric.get('value_text') or '—'))}</strong><span>{html.escape(live_unit)}</span></div>
+              <p class="process-headline">{html.escape(str(metric.get('headline') or ''))}</p>
+              <p class="process-detail">{html.escape(str(metric.get('detail') or ''))}</p>
+              <div class="process-chart-wrap">
+                <canvas class="process-chart" role="img"
+                  aria-label="{html.escape(str(metric.get('title') or metric_id))}时间序列曲线"
+                  data-chart-kind="{html.escape(str(chart.get('kind') or 'positive'))}"></canvas>
+                <div class="process-chart-empty" {'hidden' if has_series else ''}>暂无可绘制数据</div>
+              </div>
+              <div class="process-live">
+                <span>当前 <b data-live-value>--</b> <em data-live-extra></em></span>
+                <span title="{html.escape(live_chart_unit)}">点击曲线可跳转视频</span>
+              </div>
+              <details class="process-basis">
+                <summary>定义与阈值依据</summary>
+                {''.join(details) or '<p>数据不足，暂无说明。</p>'}
+              </details>
+            </article>
+            """
+        )
+    return "".join(cards)
+
+
+PROCESS_METRICS_SCRIPT = r"""
+(() => {
+  const payload = window.__VIGORYSYNC_PROCESS_METRICS__ || null;
+  const cards = [...document.querySelectorAll('[data-process-metric]')];
+  const media = document.getElementById('player');
+  if (!cards.length) return;
+  const setEmpty = (entry, message) => {
+    if (entry.empty) {
+      entry.empty.textContent = message;
+      entry.empty.hidden = false;
+    }
+  };
+  if (!payload || !payload.metrics) {
+    for (const card of cards) setEmpty({ empty: card.querySelector('.process-chart-empty') }, '3D 轨迹不可用');
+    return;
+  }
+  const duration = Math.max(0.001, Number(payload.duration_s) || 0.001);
+  const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+  const fmt = (value, digits = 1) => Number.isFinite(value) ? value.toFixed(digits) : '--';
+  const entries = cards.map((card) => {
+    const metricId = card.dataset.processMetric;
+    return {
+      card,
+      metric: payload.metrics[metricId] || {},
+      canvas: card.querySelector('.process-chart'),
+      wrap: card.querySelector('.process-chart-wrap'),
+      empty: card.querySelector('.process-chart-empty'),
+      liveValue: card.querySelector('[data-live-value]'),
+      liveExtra: card.querySelector('[data-live-extra]'),
+      width: 0,
+      height: 0,
+      dpr: 1
+    };
+  }).filter((entry) => entry.canvas && entry.metric && entry.metric.chart);
+
+  function resize(entry) {
+    const rect = entry.wrap.getBoundingClientRect();
+    entry.width = Math.max(220, rect.width);
+    entry.height = Math.max(150, rect.height);
+    entry.dpr = Math.min(2, window.devicePixelRatio || 1);
+    entry.canvas.width = Math.round(entry.width * entry.dpr);
+    entry.canvas.height = Math.round(entry.height * entry.dpr);
+    entry.canvas.style.width = `${entry.width}px`;
+    entry.canvas.style.height = `${entry.height}px`;
+    entry.canvas.getContext('2d').setTransform(entry.dpr, 0, 0, entry.dpr, 0, 0);
+  }
+
+  function domain(entry) {
+    const chart = entry.metric.chart;
+    const values = (chart.series?.v || []).map(Number).filter(Number.isFinite);
+    const warn = Number(chart.warn) || 0;
+    const alarm = Number(chart.alarm) || 0;
+    if (chart.kind === 'signed') {
+      const observed = values.reduce((peak, value) => Math.max(peak, Math.abs(value)), 0);
+      const limit = Math.max(observed * 1.18, warn * 1.55, alarm * 1.25, 1);
+      return { min: -limit, max: limit };
+    }
+    const observed = values.reduce((peak, value) => Math.max(peak, value), 0);
+    return { min: 0, max: Math.max(observed * 1.15, alarm * 1.28, warn * 1.5, 1) };
+  }
+
+  function draw(entry, currentTime) {
+    const chart = entry.metric.chart;
+    const series = chart.series || {};
+    const times = (series.t || []).map(Number);
+    const values = (series.v || []).map(Number);
+    const ctx = entry.canvas.getContext('2d');
+    ctx.clearRect(0, 0, entry.width, entry.height);
+    if (!times.length || !values.length) {
+      setEmpty(entry, '暂无可绘制数据');
+      return;
+    }
+    entry.empty.hidden = true;
+    const plot = { left: 43, right: 12, top: 19, bottom: 27 };
+    const plotWidth = Math.max(1, entry.width - plot.left - plot.right);
+    const plotHeight = Math.max(1, entry.height - plot.top - plot.bottom);
+    const x = (time) => plot.left + clamp(time / duration, 0, 1) * plotWidth;
+    const limits = domain(entry);
+    const y = (value) => plot.top + (limits.max - value) / (limits.max - limits.min) * plotHeight;
+    const warn = Number(chart.warn);
+    const alarm = Number(chart.alarm);
+    const positiveWarn = Number.isFinite(warn) ? y(warn) : null;
+    const positiveAlarm = Number.isFinite(alarm) ? y(alarm) : null;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(241,240,231,.018)';
+    ctx.fillRect(plot.left, plot.top, plotWidth, plotHeight);
+    const reps = Array.isArray(chart.reps) ? chart.reps : [];
+    reps.forEach((rep, index) => {
+      const left = x(Number(rep.start_s) || 0);
+      const right = x(Number(rep.end_s) || 0);
+      ctx.fillStyle = index % 2 ? 'rgba(134,232,255,.035)' : 'rgba(217,255,67,.035)';
+      ctx.fillRect(left, plot.top, Math.max(1, right - left), plotHeight);
+      if (right - left > 33) {
+        ctx.fillStyle = 'rgba(241,240,231,.42)';
+        ctx.font = '9px ui-monospace,Consolas,monospace';
+        ctx.fillText(`R${rep.rep_id}`, left + 4, plot.top + 11);
+      }
+    });
+
+    if (chart.kind === 'signed' && Number.isFinite(warn) && Number.isFinite(alarm)) {
+      const warnY = y(warn), alarmY = y(alarm), lowWarnY = y(-warn), lowAlarmY = y(-alarm);
+      ctx.fillStyle = 'rgba(240,197,107,.10)';
+      ctx.fillRect(plot.left, warnY, plotWidth, Math.max(0, alarmY - warnY));
+      ctx.fillRect(plot.left, lowWarnY, plotWidth, Math.max(0, lowAlarmY - lowWarnY));
+      ctx.fillStyle = 'rgba(255,100,77,.12)';
+      ctx.fillRect(plot.left, plot.top, plotWidth, Math.max(0, alarmY - plot.top));
+      ctx.fillRect(plot.left, lowAlarmY, plotWidth, Math.max(0, plot.top + plotHeight - lowAlarmY));
+    } else if (Number.isFinite(warn) && Number.isFinite(alarm)) {
+      ctx.fillStyle = 'rgba(240,197,107,.10)';
+      ctx.fillRect(plot.left, positiveWarn, plotWidth, Math.max(0, positiveAlarm - positiveWarn));
+      ctx.fillStyle = 'rgba(255,100,77,.12)';
+      ctx.fillRect(plot.left, plot.top, plotWidth, Math.max(0, positiveAlarm - plot.top));
+    }
+
+    ctx.strokeStyle = 'rgba(241,240,231,.11)';
+    ctx.lineWidth = 1;
+    ctx.font = '9px ui-monospace,Consolas,monospace';
+    ctx.fillStyle = 'rgba(158,163,154,.86)';
+    for (let step = 0; step <= 4; step += 1) {
+      const value = limits.max - (limits.max - limits.min) * step / 4;
+      const py = y(value);
+      ctx.beginPath();
+      ctx.moveTo(plot.left, py);
+      ctx.lineTo(plot.left + plotWidth, py);
+      ctx.stroke();
+      ctx.fillText(`${value.toFixed(value === 0 ? 0 : 1)}`, 4, py + 3);
+    }
+
+    const thresholdLine = (value, label, color) => {
+      if (!Number.isFinite(value)) return;
+      const py = y(value);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.setLineDash([5, 4]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(plot.left, py);
+      ctx.lineTo(plot.left + plotWidth, py);
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.font = '8px ui-monospace,Consolas,monospace';
+      ctx.fillText(label, plot.left + plotWidth - 58, py - 4);
+      ctx.restore();
+    };
+    thresholdLine(warn, '关注', 'rgba(240,197,107,.9)');
+    thresholdLine(alarm, '异常', 'rgba(255,100,77,.92)');
+    if (chart.kind === 'signed') {
+      thresholdLine(-warn, '关注', 'rgba(240,197,107,.72)');
+      thresholdLine(-alarm, '异常', 'rgba(255,100,77,.75)');
+    }
+
+    const color = entry.metric.status === 'abnormal'
+      ? '#ff644d'
+      : entry.metric.status === 'attention' ? '#f0c56b' : '#86e8ff';
+    ctx.save();
+    ctx.beginPath();
+    let started = false;
+    for (let index = 0; index < times.length; index += 1) {
+      if (!Number.isFinite(values[index])) {
+        started = false;
+        continue;
+      }
+      const px = x(times[index]);
+      const py = y(values[index]);
+      if (!started) {
+        ctx.moveTo(px, py);
+        started = true;
+      } else {
+        ctx.lineTo(px, py);
+      }
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.2;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 7;
+    ctx.stroke();
+    ctx.restore();
+
+    const cursorX = x(currentTime);
+    ctx.strokeStyle = 'rgba(241,240,231,.7)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cursorX, plot.top);
+    ctx.lineTo(cursorX, plot.top + plotHeight);
+    ctx.stroke();
+    let nearest = 0;
+    for (let index = 1; index < times.length; index += 1) {
+      if (Math.abs(times[index] - currentTime) < Math.abs(times[nearest] - currentTime)) nearest = index;
+    }
+    const pointX = x(times[nearest]);
+    const pointY = y(values[nearest]);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(pointX, pointY, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (entry.liveValue) {
+      const value = values[nearest];
+      if (entry.metric.id === 'symmetry_index') {
+        const si = Number(series.si?.[nearest]);
+        entry.liveValue.textContent = `角差 ${fmt(value, 1)}°`;
+        if (entry.liveExtra) entry.liveExtra.textContent = Number.isFinite(si) ? `· SI ${fmt(si, 0)}` : '';
+      } else if (entry.metric.id === 'com_ap_drift') {
+        entry.liveValue.textContent = `${value >= 0 ? '+' : ''}${fmt(value, 1)} cm`;
+        if (entry.liveExtra) entry.liveExtra.textContent = '';
+      } else {
+        entry.liveValue.textContent = `${fmt(value, 1)}°`;
+        if (entry.liveExtra) entry.liveExtra.textContent = '';
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawAll() {
+    const currentTime = Number(media?.currentTime) || 0;
+    for (const entry of entries) draw(entry, currentTime);
+  }
+
+  for (const entry of entries) {
+    resize(entry);
+    entry.canvas.addEventListener('click', (event) => {
+      const rect = entry.canvas.getBoundingClientRect();
+      const plotLeft = 43;
+      const plotRight = 12;
+      const ratio = clamp((event.clientX - rect.left - plotLeft) / Math.max(1, rect.width - plotLeft - plotRight), 0, 1);
+      const target = ratio * duration;
+      if (typeof seekTo === 'function') {
+        seekTo(target, `查看过程指标 · ${target.toFixed(2)}s`);
+      } else if (media) {
+        media.currentTime = target;
+      }
+    });
+    if (window.ResizeObserver) {
+      const observer = new ResizeObserver(() => { resize(entry); drawAll(); });
+      observer.observe(entry.wrap);
+    }
+  }
+  media?.addEventListener('timeupdate', drawAll);
+  media?.addEventListener('seeked', drawAll);
+  media?.addEventListener('loadedmetadata', drawAll);
+  window.addEventListener('resize', drawAll);
+  drawAll();
+})();
+"""
+
+
+TRAJECTORY_CHART_SCRIPT = r"""
+(() => {
+  const data = window.__VIGORYSYNC_TRAJECTORY__ || null;
+  const stage = document.getElementById('trajectory-stage');
+  const canvas = document.getElementById('trajectory-canvas');
+  const tip = document.getElementById('trajectory-tip');
+  const legend = document.getElementById('trajectory-legend');
+  if (!data || !stage || !canvas) return;
+  const progress = (data.progress || []).map(Number);
+  const template = (data.template_curve || []).map(Number);
+  if (!progress.length || !template.length) return;
+  const flexed = Number(data.template_flexed_progress_pct);
+  const reps = (data.user_reps || []).map((rep, index) => ({
+    id: rep.rep_id,
+    curve: (rep.curve || []).map(Number),
+    hidden: false,
+    color: '#86e8ff'
+  }));
+  const rampColor = (index, count) => {
+    const t = count <= 1 ? 0.5 : index / (count - 1);
+    return `hsl(191, 72%, ${(45 + 45 * t).toFixed(1)}%)`;
+  };
+  reps.forEach((rep, index) => {
+    rep.color = rampColor(index, reps.length);
+  });
+
+  const chips = legend ? [...legend.querySelectorAll('[data-rep-index]')] : [];
+  chips.forEach((chip) => {
+    const rep = reps[Number(chip.dataset.repIndex)];
+    if (rep) chip.style.setProperty('--key', rep.color);
+  });
+
+  const state = { width: 0, height: 0, dpr: 1, hover: -1 };
+  const PAD = { left: 46, right: 14, top: 16, bottom: 26 };
+  const ctx = canvas.getContext('2d');
+  const fmt = (value, digits = 1) => Number.isFinite(value) ? value.toFixed(digits) : '--';
+
+  function resize() {
+    state.width = Math.max(240, stage.clientWidth);
+    state.height = Math.max(180, stage.clientHeight);
+    state.dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(state.width * state.dpr);
+    canvas.height = Math.round(state.height * state.dpr);
+    ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+  }
+
+  function limits() {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const value of template) {
+      if (!Number.isFinite(value)) continue;
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+    }
+    for (const rep of reps) for (const value of rep.curve) {
+      if (!Number.isFinite(value)) continue;
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+    }
+    if (!Number.isFinite(min)) return { min: 0, max: 180 };
+    if (max - min < 20) {
+      const mid = (max + min) / 2;
+      min = mid - 10;
+      max = mid + 10;
+    }
+    const pad = (max - min) * 0.08;
+    return { min: min - pad, max: max + pad };
+  }
+
+  function draw() {
+    const plot = {
+      left: PAD.left,
+      top: PAD.top,
+      width: Math.max(1, state.width - PAD.left - PAD.right),
+      height: Math.max(1, state.height - PAD.top - PAD.bottom)
+    };
+    const range = limits();
+    const x = (value) => plot.left + Math.min(1, Math.max(0, (Number(value) || 0) / 100)) * plot.width;
+    const y = (value) => plot.top + (range.max - value) / (range.max - range.min) * plot.height;
+
+    ctx.clearRect(0, 0, state.width, state.height);
+    ctx.fillStyle = 'rgba(241,240,231,.018)';
+    ctx.fillRect(plot.left, plot.top, plot.width, plot.height);
+
+    ctx.lineWidth = 1;
+    ctx.font = '9px ui-monospace,Consolas,monospace';
+    for (let step = 0; step <= 4; step += 1) {
+      const value = range.max - (range.max - range.min) * step / 4;
+      const py = y(value);
+      ctx.strokeStyle = 'rgba(241,240,231,.11)';
+      ctx.beginPath();
+      ctx.moveTo(plot.left, py);
+      ctx.lineTo(plot.left + plot.width, py);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(158,163,154,.86)';
+      ctx.fillText(value.toFixed(0), 4, py + 3);
+    }
+    for (let value = 0; value <= 100; value += 25) {
+      const px = x(value);
+      ctx.strokeStyle = 'rgba(241,240,231,.07)';
+      ctx.beginPath();
+      ctx.moveTo(px, plot.top);
+      ctx.lineTo(px, plot.top + plot.height);
+      ctx.stroke();
+      const width = ctx.measureText(String(value)).width;
+      ctx.fillStyle = 'rgba(158,163,154,.86)';
+      ctx.fillText(String(value), px - (value === 0 ? 0 : value === 100 ? width : width / 2), plot.top + plot.height + 14);
+    }
+
+    if (Number.isFinite(flexed)) {
+      const px = x(flexed);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(241,240,231,.32)';
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(px, plot.top);
+      ctx.lineTo(px, plot.top + plot.height);
+      ctx.stroke();
+      ctx.restore();
+      ctx.font = '9px "Microsoft YaHei",system-ui,sans-serif';
+      ctx.fillStyle = 'rgba(158,163,154,.9)';
+      const label = '标准最低点';
+      const width = ctx.measureText(label).width;
+      ctx.fillText(label, Math.min(plot.left + plot.width - width, Math.max(plot.left, px + 4)), plot.top + 10);
+      ctx.font = '9px ui-monospace,Consolas,monospace';
+    }
+
+    const stroke = (values, color, width, dash, glow) => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      if (dash) ctx.setLineDash(dash);
+      if (glow) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = glow;
+      }
+      ctx.beginPath();
+      let started = false;
+      for (let index = 0; index < values.length; index += 1) {
+        const value = values[index];
+        if (!Number.isFinite(value)) {
+          started = false;
+          continue;
+        }
+        const pointX = x(progress[index]);
+        const pointY = y(value);
+        if (!started) {
+          ctx.moveTo(pointX, pointY);
+          started = true;
+        } else {
+          ctx.lineTo(pointX, pointY);
+        }
+      }
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    for (const rep of reps) if (!rep.hidden) stroke(rep.curve, rep.color, 1.6, null, 0);
+    stroke(template, '#d9ff43', 2.4, [7, 5], 6);
+
+    if (state.hover >= 0) {
+      const px = x(progress[state.hover]);
+      ctx.strokeStyle = 'rgba(241,240,231,.5)';
+      ctx.beginPath();
+      ctx.moveTo(px, plot.top);
+      ctx.lineTo(px, plot.top + plot.height);
+      ctx.stroke();
+      const dot = (values, color) => {
+        const value = values[state.hover];
+        if (!Number.isFinite(value)) return;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(px, y(value), 2.6, 0, Math.PI * 2);
+        ctx.fill();
+      };
+      for (const rep of reps) if (!rep.hidden) dot(rep.curve, rep.color);
+      dot(template, '#d9ff43');
+    }
+  }
+
+  function updateTip(index) {
+    if (!tip) return;
+    if (index < 0) {
+      tip.hidden = true;
+      return;
+    }
+    const rows = [`<b>进度 ${progress[index].toFixed(0)}%</b>`];
+    rows.push(`<span class="t-row"><i class="t-dot" style="background:#d9ff43"></i>标准 ${fmt(template[index])}°</span>`);
+    for (const rep of reps) {
+      if (rep.hidden) continue;
+      rows.push(`<span class="t-row"><i class="t-dot" style="background:${rep.color}"></i>第 ${rep.id} 次 ${fmt(rep.curve[index])}°</span>`);
+    }
+    tip.innerHTML = rows.join('');
+    tip.hidden = false;
+    const left = PAD.left + (progress[index] / 100) * Math.max(1, state.width - PAD.left - PAD.right);
+    const width = tip.offsetWidth;
+    tip.style.left = `${Math.min(state.width - width - 8, Math.max(8, left + 12))}px`;
+    tip.style.top = '8px';
+  }
+
+  function nearestIndex(pointerX) {
+    const width = Math.max(1, state.width - PAD.left - PAD.right);
+    const ratio = Math.min(1, Math.max(0, (pointerX - PAD.left) / width));
+    return Math.round(ratio * (progress.length - 1));
+  }
+
+  canvas.addEventListener('pointermove', (event) => {
+    const rect = canvas.getBoundingClientRect();
+    state.hover = nearestIndex(event.clientX - rect.left);
+    updateTip(state.hover);
+    draw();
+  });
+  canvas.addEventListener('pointerleave', () => {
+    state.hover = -1;
+    if (tip) tip.hidden = true;
+    draw();
+  });
+
+  chips.forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const rep = reps[Number(chip.dataset.repIndex)];
+      if (!rep) return;
+      rep.hidden = !rep.hidden;
+      chip.classList.toggle('is-off', rep.hidden);
+      chip.setAttribute('aria-pressed', String(!rep.hidden));
+      if (state.hover >= 0) updateTip(state.hover);
+      draw();
+    });
+  });
+
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      resize();
+      draw();
+    }).observe(stage);
+  } else {
+    window.addEventListener('resize', () => {
+      resize();
+      draw();
+    });
+  }
+  resize();
+  draw();
+})();
+"""
+
+
+def build_trajectory_section(
+    output_dir: Path, trajectory_dir: Path | None, clip_id: str
+) -> str:
+    """Render the optional DTW trajectory block for report_v2.html."""
+    if trajectory_dir is None:
+        return ""
+    json_path = trajectory_dir / clip_id / "overlay.json"
+    if not json_path.is_file():
+        return ""
+    overlay = json.loads(json_path.read_text(encoding="utf-8"))
+    reps = [rep for rep in overlay.get("user_reps") or [] if rep.get("curve")]
+    template_curve = overlay.get("template_curve") or []
+    if not reps or not template_curve:
+        return ""
+    angles = overlay.get("angles") or {}
+    units = overlay.get("units", "")
+    unit_label = "°" if units == "degrees" else units
+    band = overlay.get("dtw_band_hit_reps") or []
+    excluded = overlay.get("excluded_reps") or []
+    target = output_dir / "trajectory"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(json_path, target / "overlay.json")
+    bottoms = [min(rep["curve"]) for rep in reps]
+    tops = [max(rep["curve"]) for rep in reps]
+    template_range = (
+        f"{min(template_curve):.1f}–{max(template_curve):.1f} {unit_label}".strip()
+        if template_curve
+        else "-"
+    )
+    user_range = (
+        f"底 {min(bottoms):.1f}–{max(bottoms):.1f} / 顶 {min(tops):.1f}–{max(tops):.1f}"
+        if reps
+        else "-"
+    )
+    excluded_text = "、".join(
+        f"rep {item['rep_id']}（{item['reason']}）" for item in excluded
+    ) or "无"
+    band_set = {int(rep_id) for rep_id in band}
+    band_text = "、".join(f"rep {rep_id}" for rep_id in band) or "无"
+    payload = {
+        "progress": overlay.get("progress") or [],
+        "template_curve": template_curve,
+        "template_flexed_progress_pct": overlay.get("template_flexed_progress_pct"),
+        "dtw_band_hit_reps": band,
+        "user_reps": [
+            {"rep_id": rep.get("rep_id"), "curve": rep["curve"]} for rep in reps
+        ],
+    }
+    payload_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
+    chips = "".join(
+        f'<button type="button" class="trajectory-key" data-rep-index="{index}" '
+        f'aria-pressed="true"><i class="swatch"></i>第 {html.escape(str(rep.get("rep_id")))} 次'
+        + (
+            '<i class="band" title="节奏差异触边"></i>'
+            if int(rep.get("rep_id")) in band_set
+            else ""
+        )
+        + "</button>"
+        for index, rep in enumerate(reps)
+    )
+    return f"""<section class="process-card" aria-labelledby="trajectory-title">
+<div class="process-head"><div><p class="eyebrow">DTW TRAJECTORY</p><h2 id="trajectory-title">动作轨迹对比</h2></div><span class="process-policy">形态对照 · 非评分</span></div>
+<div class="trajectory-metrics"><div class="metric"><span>参与对比 rep</span><strong>{len(reps)}</strong></div><div class="metric"><span>标准曲线范围</span><strong>{html.escape(template_range)}</strong></div><div class="metric"><span>用户底端 / 顶端</span><strong>{html.escape(user_range)}</strong></div><div class="metric"><span>节奏差异触边</span><strong>{len(band)}</strong></div></div>
+<p class="trajectory-axis-label">关节角度 (°) · {html.escape(angles.get('user', '-'))}</p>
+<div class="trajectory-stage" id="trajectory-stage">
+<canvas id="trajectory-canvas" role="img" aria-label="用户动作与标准模板的关节角度时序对比"></canvas>
+<div class="trajectory-tip" id="trajectory-tip" hidden></div>
+</div>
+<p class="trajectory-axis-label is-right">动作进度 (%)</p>
+<div class="trajectory-legend" id="trajectory-legend"><span class="trajectory-key is-template"><i class="swatch"></i>标准模板</span>{chips}</div>
+<p class="process-footnote">曲线按 DTW 对齐到标准动作的进度轴，仅用于形态对照，不输出评分、相似度或问题判定。不同视角的对比不会生成，左侧与右侧侧视按同一动作处理。<br>节奏差异触边：{html.escape(band_text)}；被排除 rep：{html.escape(excluded_text)}。</p>
+<p class="process-footnote"><a class="trajectory-download" href="trajectory/overlay.json" download>下载对比数据（overlay.json）</a></p>
+<script>window.__VIGORYSYNC_TRAJECTORY__={payload_json};</script>
+<script>{TRAJECTORY_CHART_SCRIPT}</script>
+</section>
+"""
+
+
 def build_report_html(
     feedback: dict[str, Any],
     *,
     media_url: str,
     frame_url_template: str,
     timeline: dict[str, Any] | None = None,
+    motion: dict[str, Any] | None = None,
+    trajectory_html: str = "",
 ) -> str:
     clip_id = feedback["clip_id"]
     timeline = timeline or {"duration_s": 0.0, "reps": []}
@@ -870,6 +2740,14 @@ def build_report_html(
         ensure_ascii=False,
         separators=(",", ":"),
     ).replace("</", "<\\/")
+    motion_json = json.dumps(
+        motion or None,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
+    motion_script = MOTION_TRACE_SCRIPT.replace("__MOTION_DATA__", motion_json)
+    process_script = PROCESS_METRICS_SCRIPT
+    process_cards = build_process_metric_cards(motion)
     summary = feedback.get("assessment_summary") or {}
     quality = str(summary.get("quality_status") or "unknown")
     quality_label = {
@@ -924,11 +2802,15 @@ def build_report_html(
             if realtime_card
             else ""
         )
+        highlight_attr = ",".join(
+            str(index) for index in motion_joint_indices(card.get("highlight_joints") or [])
+        )
         cards_html.append(
             f"""
             <article class="issue-card {html.escape(card['severity'])}"
               data-issue-id="{html.escape(str(card['issue_id']))}"
-              data-anchor="{card['anchor_time_s']}" data-start="{start}" data-end="{end}">
+              data-anchor="{card['anchor_time_s']}" data-start="{start}" data-end="{end}"
+              data-joints="{highlight_attr}">
               <div class="issue-head">
                 <span class="severity">{html.escape(severity_label.get(card['severity'], card['severity']))}</span>
                 <span class="candidate">研究候选</span>
@@ -994,10 +2876,9 @@ background-size:54px 54px,54px 54px,auto,auto,auto;color:var(--ink);font-family:
 .brand{{display:flex;align-items:center;gap:13px}}.mark{{display:grid;place-items:center;width:50px;height:38px;border:1px solid rgba(217,255,67,.72);color:var(--acid);font-weight:900;transform:skewX(-7deg)}}
 .brand-copy b{{display:block;letter-spacing:.18em;font-size:13px}}.brand-copy span{{display:block;margin-top:4px;color:var(--muted);font-size:10px;letter-spacing:.16em}}
 .job-id{{color:var(--muted);font-family:ui-monospace,Consolas,monospace;font-size:11px;text-align:right;overflow-wrap:anywhere}}
-.hero{{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(280px,.55fr);gap:18px;align-items:stretch}}
-.visual,.snapshot,.issue-card,.limitations{{border:1px solid var(--line);background:linear-gradient(145deg,rgba(255,255,255,.035),transparent 46%),var(--surface)}}
-.visual{{overflow:hidden}}.video-frame{{position:relative;background:#020302;min-height:300px}}
-video{{display:block;width:100%;aspect-ratio:4/3;max-height:68vh;object-fit:contain;background:#020302}}
+.hero{{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(320px,.72fr);gap:18px;align-items:start}}
+.visual,.snapshot,.motion-card,.issue-card,.limitations{{border:1px solid var(--line);background:linear-gradient(145deg,rgba(255,255,255,.035),transparent 46%),var(--surface)}}
+.visual{{overflow:hidden}}.video-frame{{position:relative;background:#020302;min-height:300px}}video{{display:block;width:100%;aspect-ratio:4/3;max-height:68vh;object-fit:contain;background:#020302}}#skeleton-canvas{{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1}}
 .visual-foot{{display:flex;justify-content:space-between;gap:12px;padding:13px 16px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}}
 .rep-timeline{{padding:15px 16px 12px;border-top:1px solid var(--line);background:linear-gradient(180deg,rgba(217,255,67,.025),transparent)}}
 .timeline-head{{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}}.timeline-title{{display:flex;align-items:center;gap:8px}}.timeline-kicker{{color:var(--acid);font-size:9px;font-weight:800;letter-spacing:.16em}}.timeline-state{{color:var(--muted);font-size:9px}}
@@ -1011,12 +2892,28 @@ video{{display:block;width:100%;aspect-ratio:4/3;max-height:68vh;object-fit:cont
 .timeline-cursor{{position:absolute;top:0;bottom:8px;left:0;width:1px;background:var(--ink);pointer-events:none}}.timeline-cursor::before{{content:"";position:absolute;top:-2px;left:-3px;border-right:3px solid transparent;border-left:3px solid transparent;border-top:5px solid var(--ink)}}
 .timeline-axis{{position:relative;height:15px;margin-top:5px;color:var(--muted);font:9px/1 ui-monospace,Consolas,monospace}}.timeline-tick{{position:absolute;transform:translateX(-50%)}}
 .timeline-empty{{padding:10px 0 2px;color:var(--muted);font-size:11px}}
-.snapshot{{padding:24px}}.eyebrow{{margin:0 0 9px;color:var(--acid);font-size:10px;font-weight:800;letter-spacing:.16em}}
-.snapshot h1{{margin:0;font-size:clamp(28px,4vw,48px);line-height:1.05;letter-spacing:-.04em}}
-.snapshot h1 em{{display:block;margin-top:5px;color:transparent;font-style:normal;-webkit-text-stroke:1px var(--acid)}}
-.status{{display:inline-flex;margin-top:18px;padding:7px 11px;border:1px solid rgba(240,197,107,.45);border-radius:999px;color:var(--amber);font-size:11px}}
-.metrics{{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;margin-top:22px;border:1px solid var(--line);background:var(--line)}}
-.metric{{padding:16px;background:var(--panel)}}.metric span{{display:block;color:var(--muted);font-size:10px}}.metric strong{{display:block;margin-top:7px;color:var(--acid);font-size:28px}}
+.snapshot{{display:grid;grid-column:1/-1;grid-template-columns:minmax(190px,.55fr) minmax(0,1fr);gap:22px;align-items:center;margin-top:18px;padding:20px 22px}}.eyebrow{{margin:0 0 9px;color:var(--acid);font-size:10px;font-weight:800;letter-spacing:.16em}}
+.snapshot h1{{margin:0;font-size:clamp(24px,3vw,36px);line-height:1.05;letter-spacing:-.04em}}
+.snapshot h1 em{{display:block;margin-top:4px;color:transparent;font-style:normal;-webkit-text-stroke:1px var(--acid)}}
+.status{{display:inline-flex;margin-top:12px;padding:6px 10px;border:1px solid rgba(240,197,107,.45);border-radius:999px;color:var(--amber);font-size:10px}}
+.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin:0;border:1px solid var(--line);background:var(--line)}}
+.metric{{padding:13px 14px;background:var(--panel)}}.metric span{{display:block;color:var(--muted);font-size:10px}}.metric strong{{display:block;margin-top:6px;color:var(--acid);font-size:24px}}
+.motion-card{{padding:18px;overflow:hidden}}.motion-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:13px}}.motion-head h2{{margin:0;font-size:22px}}.motion-time{{color:var(--cyan);font:10px/1.4 ui-monospace,Consolas,monospace;white-space:nowrap}}
+.motion-stage{{position:relative;height:430px;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:radial-gradient(circle at 50% 38%,rgba(134,232,255,.08),transparent 50%),linear-gradient(180deg,rgba(217,255,67,.035),transparent 70%),#080b09}}
+.motion-stage canvas{{display:block;width:100%;height:100%;touch-action:none;cursor:grab}}.motion-stage canvas:active{{cursor:grabbing}}.motion-badge{{position:absolute;top:10px;left:10px;padding:4px 7px;border:1px solid rgba(134,232,255,.22);background:rgba(5,7,6,.66);color:var(--muted);font:9px/1.2 ui-monospace,Consolas,monospace;pointer-events:none}}
+.motion-legend{{position:absolute;right:10px;top:10px;display:flex;gap:8px;align-items:center;padding:4px 7px;background:rgba(5,7,6,.66);border:1px solid var(--line);color:var(--muted);font-size:9px;pointer-events:none}}.motion-legend span{{display:inline-flex;align-items:center;gap:4px}}.motion-dot{{display:inline-block;width:6px;height:6px;border-radius:50}}.motion-dot.left{{background:var(--cyan)}}.motion-dot.right{{background:var(--acid)}}.motion-dash{{display:inline-block;width:12px;border-top:1px dashed rgba(241,240,231,.8)}}
+.motion-empty{{position:absolute;inset:0;display:grid;place-items:center;padding:24px;background:rgba(5,7,6,.72);color:var(--muted);font-size:11px;text-align:center;pointer-events:none}}.motion-empty[hidden]{{display:none}}
+.motion-controls{{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px}}.motion-mode{{color:var(--muted);font-size:10px}}.motion-controls button{{padding:7px 10px;font-size:10px}}.motion-prediction{{margin-top:8px;padding:6px 8px;border-left:2px solid var(--amber);background:rgba(240,197,107,.07);color:var(--amber);font-size:10px;line-height:1.45}}.motion-prediction[hidden]{{display:none}}.motion-note{{margin:9px 0 0;color:var(--muted);font-size:9px}}
+.process-card{{margin-top:18px;padding:20px 22px;border:1px solid var(--line);background:linear-gradient(145deg,rgba(255,255,255,.035),transparent 46%),var(--surface)}}
+.process-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:6px}}.process-head h2{{margin:0;font-size:26px}}.process-policy{{padding:5px 9px;border:1px solid rgba(240,197,107,.36);border-radius:999px;color:var(--amber);font-size:9px;white-space:nowrap}}
+.process-intro{{margin:0 0 14px;max-width:900px;color:var(--muted);font-size:11px;line-height:1.65}}.process-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}
+.trajectory-metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin:14px 0;border:1px solid var(--line);background:var(--line)}}.trajectory-axis-label{{margin:14px 0 6px;color:var(--muted);font:9px/1.3 ui-monospace,Consolas,monospace;letter-spacing:.08em}}.trajectory-axis-label.is-right{{margin:6px 0 0;text-align:right}}.trajectory-stage{{position:relative;height:340px;border:1px solid rgba(241,240,231,.08);background:#080b09}}.trajectory-stage canvas{{display:block;width:100%;height:100%;touch-action:none;cursor:crosshair}}.trajectory-tip{{position:absolute;top:8px;left:8px;z-index:2;min-width:132px;padding:7px 9px;border:1px solid var(--line);background:rgba(5,7,6,.94);color:#d8dccf;font:10px/1.65 ui-monospace,Consolas,monospace;pointer-events:none;white-space:nowrap}}.trajectory-tip[hidden]{{display:none}}.trajectory-tip b{{color:var(--ink);font-weight:700}}.trajectory-tip .t-row{{display:flex;align-items:center;gap:5px}}.trajectory-tip .t-dot{{width:6px;height:6px;border-radius:50%;flex:0 0 auto}}.trajectory-legend{{display:flex;flex-wrap:wrap;gap:6px;margin:9px 0 0}}.trajectory-key{{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.02);color:#c8ccc3;font:500 10px/1.2 "Microsoft YaHei",system-ui,sans-serif;cursor:pointer}}.trajectory-key.is-template{{cursor:default;color:var(--muted)}}.trajectory-key .swatch{{width:14px;border-top:2px solid var(--key,#86e8ff)}}.trajectory-key.is-template .swatch{{border-top:2px dashed var(--acid)}}.trajectory-key.is-off{{opacity:.42}}.trajectory-key .band{{width:5px;height:5px;border-radius:50%;background:var(--amber)}}.trajectory-download{{color:var(--cyan);text-decoration:none}}.trajectory-download:hover{{text-decoration:underline}}
+.process-metric{{min-width:0;padding:15px;border:1px solid var(--line);border-top:2px solid var(--cyan);background:var(--panel)}}.process-metric.attention{{border-top-color:var(--amber)}}.process-metric.abnormal{{border-top-color:var(--signal)}}.process-metric.unavailable{{border-top-color:var(--muted)}}
+.process-metric-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}}.process-metric-head>div{{display:flex;align-items:baseline;gap:7px;min-width:0}}.process-index{{color:var(--muted);font:9px/1 ui-monospace,Consolas,monospace}}.process-metric h3{{margin:0;font-size:16px;line-height:1.25}}
+.process-status{{padding:4px 7px;border-radius:999px;font-size:9px;font-weight:800;white-space:nowrap}}.process-status.normal{{background:rgba(134,232,255,.12);color:var(--cyan)}}.process-status.attention{{background:rgba(240,197,107,.12);color:var(--amber)}}.process-status.abnormal{{background:rgba(255,100,77,.14);color:var(--signal)}}.process-status.unavailable{{background:rgba(158,163,154,.1);color:var(--muted)}}
+.process-reading{{display:flex;align-items:baseline;gap:5px;margin-top:14px}}.process-reading strong{{font-size:31px;line-height:1;color:var(--ink)}}.process-reading span{{color:var(--muted);font-size:10px}}.process-headline{{margin:10px 0 0;color:#d8dccf;font-size:11px;font-weight:700;line-height:1.45}}.process-detail{{min-height:32px;margin:5px 0 0;color:var(--muted);font-size:9px;line-height:1.5}}
+.process-chart-wrap{{position:relative;height:190px;margin-top:11px;border:1px solid rgba(241,240,231,.08);background:#080b09}}.process-chart{{display:block;width:100%;height:100%;cursor:crosshair}}.process-chart-empty{{position:absolute;inset:0;display:grid;place-items:center;padding:14px;background:rgba(8,11,9,.88);color:var(--muted);font-size:10px;text-align:center;pointer-events:none}}.process-chart-empty[hidden]{{display:none}}
+.process-live{{display:flex;justify-content:space-between;gap:8px;margin-top:8px;color:var(--muted);font:9px/1.45 ui-monospace,Consolas,monospace}}.process-live b{{color:var(--ink);font-weight:700}}.process-live em{{color:var(--cyan);font-style:normal}}.process-basis{{margin-top:10px;border-top:1px solid var(--line);padding-top:9px;color:var(--muted);font-size:9px;line-height:1.55}}.process-basis summary{{cursor:pointer;color:#c9cec3;font-weight:700}}.process-basis p{{margin:8px 0 0}}.process-basis b{{color:var(--ink)}}.process-view-note{{color:var(--amber)}}.process-empty{{padding:22px;border:1px dashed var(--line);color:var(--muted);font-size:11px}}.process-footnote{{margin:12px 0 0;color:var(--muted);font-size:9px;line-height:1.55}}
 .banner{{margin:18px 0;padding:16px 18px;border:1px solid rgba(240,197,107,.35);border-left:3px solid var(--amber);background:rgba(240,197,107,.07);color:#e7d8ad;line-height:1.65}}
 .banner small{{display:block;margin-top:7px;color:var(--muted)}}
 .section-head{{display:flex;align-items:end;justify-content:space-between;gap:16px;margin:32px 0 14px}}
@@ -1034,16 +2931,39 @@ video{{display:block;width:100%;aspect-ratio:4/3;max-height:68vh;object-fit:cont
 .issue-footer{{display:flex;align-items:end;justify-content:space-between;gap:14px;margin-top:14px}}.limit{{max-width:720px;margin:0;color:var(--muted);font-size:10px;line-height:1.55}}
 button{{flex:0 0 auto;padding:9px 13px;border:1px solid rgba(134,232,255,.4);border-radius:3px;background:rgba(134,232,255,.08);color:var(--cyan);font-weight:750;cursor:pointer}}
 .empty{{padding:22px;border:1px dashed var(--line);color:var(--muted)}}.limitations{{padding:20px 22px}}.limitations ul{{margin:0;padding-left:18px;color:var(--muted);line-height:1.8}}
-@media(max-width:820px){{.shell{{width:min(100% - 24px,720px);padding-top:16px}}.topbar{{align-items:flex-start}}.job-id{{max-width:46vw}}.hero{{grid-template-columns:1fr}}.video-frame{{min-height:210px}}video{{max-height:none}}.rep-timeline{{padding:13px 12px 11px}}.snapshot{{padding:20px}}.section-head{{align-items:flex-start;flex-direction:column;gap:5px}}.issue-footer{{align-items:stretch;flex-direction:column}}.issue-footer button{{width:100%}}.confidence{{margin-left:0}}}}
+@media(max-width:960px){{.shell{{width:min(100% - 24px,720px);padding-top:16px}}.topbar{{align-items:flex-start}}.job-id{{max-width:46vw}}.hero{{grid-template-columns:1fr}}.video-frame{{min-height:210px}}video{{max-height:none}}.rep-timeline{{padding:13px 12px 11px}}.snapshot{{grid-template-columns:1fr;padding:20px}}.metrics{{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:4px}}.motion-stage{{height:430px}}.process-grid{{grid-template-columns:1fr}}.process-card{{padding:17px}}.trajectory-stage{{height:260px}}.section-head{{align-items:flex-start;flex-direction:column;gap:5px}}.issue-footer{{align-items:stretch;flex-direction:column}}.issue-footer button{{width:100%}}.confidence{{margin-left:0}}}}
 @media(max-width:520px){{.topbar{{flex-direction:column;align-items:stretch;gap:12px}}.job-id{{width:100%;max-width:none;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}}}
 @media(prefers-reduced-motion:reduce){{*{{transition:none!important}}}}
 </style></head><body><main class="shell">
 <header class="topbar"><div class="brand"><span class="mark">V/S</span><div class="brand-copy"><b>VIGORSYNC</b><span>OFFLINE REVIEW · REPCHAIN</span></div></div><div class="job-id">{html.escape(clip_id)}</div></header>
-<section class="hero"><div class="visual"><div class="video-frame"><video id="player" controls playsinline preload="metadata" src="{html.escape(media_url)}"></video></div><div class="visual-foot"><span>{exercise_label} · {view_label}</span><span id="watch-status">点击 Rep 或问题证据可定位</span></div>
+<section class="hero"><div class="visual"><div class="video-frame"><video id="player" controls playsinline preload="metadata" src="{html.escape(media_url)}"></video><canvas id="skeleton-canvas" aria-hidden="true"></canvas></div><div class="visual-foot"><span>{exercise_label} · {view_label}</span><span id="watch-status">点击 Rep 或问题证据可定位</span></div>
 <section class="rep-timeline" aria-label="Rep 分割时间轴"><div class="timeline-head"><div class="timeline-title"><span class="timeline-kicker">REP TIMELINE</span><span class="timeline-state" id="timeline-state">动作切分</span></div><span class="timeline-clock" id="timeline-clock">0.00s / {timeline_payload['duration_s']:.2f}s</span></div><div id="timeline-body"></div></section></div>
-<aside class="snapshot"><p class="eyebrow">SESSION SNAPSHOT</p><h1>{exercise_label}<em>离线复盘</em></h1><span class="status">{quality_label}</span>
+<section class="motion-card" aria-labelledby="motion-title">
+<div class="motion-head"><div><p class="eyebrow">3D POSE REVIEW</p><h2 id="motion-title">3D 骨架</h2></div><span class="motion-time" id="motion-time">0.00s</span></div>
+<div class="motion-stage" id="motion-stage">
+<canvas id="motion-canvas" role="img" aria-label="脚底锚定的三维人体骨架和坐标系"></canvas>
+<div class="motion-badge">脚底地面坐标 · Y=0 · 单位 m</div>
+<div class="motion-legend"><span><i class="motion-dot left"></i>左侧</span><span><i class="motion-dot right"></i>右侧</span><span><i class="motion-dash"></i>遮挡预测</span></div>
+<div class="motion-empty" id="motion-empty" hidden>本次没有可用的 3D 姿态数据</div>
+</div>
+<div class="motion-controls">
+<span class="motion-mode">当前帧骨架 · 脚底锚定</span>
+<button type="button" id="motion-reset">重置视角</button>
+</div>
+<div class="motion-prediction" id="motion-prediction" hidden></div>
+<p class="motion-note">坐标：X 左右 · Y 垂直向上 · Z 前后 · Y=0 为脚底地面<br>虚线部分为遮挡期间的姿态预测<br>拖拽旋转 · 滚轮缩放 · 双击复位 · 骨架与视频、Rep 和问题证据同步</p>
+</section>
+</section>
+<section class="process-card" aria-labelledby="process-title">
+<div class="process-head"><div><p class="eyebrow">PROCESS METRICS</p><h2 id="process-title">过程指标</h2></div><span class="process-policy">工程阈值 · 非临床</span></div>
+<p class="process-intro">基于已有 2D 关键点重建的 3D 轨迹，观察同一个 Rep 内的重心、躯干和左右差异。曲线与视频播放、Rep 时间轴同步，点击任一曲线可跳转到对应时刻。</p>
+<div class="process-grid">{process_cards}</div>
+<p class="process-footnote">曲线按约 12 Hz 抽样；遮挡段沿用骨架预测并降低置信度。阈值用于产品内复盘与趋势比较，并非临床诊断标准。</p>
+</section>
+{trajectory_html}
+<section class="snapshot"><div><p class="eyebrow">SESSION SNAPSHOT</p><h1>{exercise_label}<em>离线复盘</em></h1><span class="status">{quality_label}</span></div>
 <div class="metrics"><div class="metric"><span>离线计数</span><strong>{summary.get('rep_count',0)}</strong></div><div class="metric"><span>问题</span><strong>{issue_count}</strong></div><div class="metric"><span>可评估指标</span><strong>{summary.get('evaluable_metric_count',0)}</strong></div><div class="metric"><span>质量</span><strong>{html.escape(quality.upper())}</strong></div></div>
-</aside></section>
+</section>
 <div class="banner">{html.escape(feedback['state_message'])}<small>研究候选结果 · Shadow-only · 不能替代教练或医学判断</small></div>
 {realtime_html}
 <div class="section-head"><h2>问题卡</h2><span>按严重度、持续性、置信度与可执行性排序</span></div>
@@ -1159,6 +3079,12 @@ for(const card of cards){{
 player.addEventListener('timeupdate',syncTimeline);
 player.addEventListener('seeked',syncTimeline);
 renderTimeline();
+</script>
+<script>
+{motion_script}
+</script>
+<script>
+{process_script}
 </script>
 </main></body></html>
 """
@@ -1277,12 +3203,19 @@ def main() -> int:
             },
         )
         media_url = args.media_url_template.format(clip_id=clip_id)
+        timeline_payload = build_report_timeline(assessment)
+        motion_payload = build_motion_payload(args.analysis_dir, analysis, timeline_payload)
+        trajectory_section = build_trajectory_section(
+            output, args.trajectory_dir, clip_id
+        )
         (output / "report_v2.html").write_text(
             build_report_html(
                 feedback,
                 media_url=media_url,
                 frame_url_template=args.frame_url_template,
-                timeline=build_report_timeline(assessment),
+                timeline=timeline_payload,
+                motion=motion_payload,
+                trajectory_html=trajectory_section,
             ),
             encoding="utf-8",
         )

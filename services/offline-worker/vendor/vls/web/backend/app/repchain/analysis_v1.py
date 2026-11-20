@@ -248,8 +248,9 @@ def extract_clip_pose(
                     "frame_id": local_index,
                     "source_frame": source_frame,
                     "timestamp_ms": timestamp_ms,
-                    "landmarks_world": payload["landmarks_world"],
-                    "visibility": payload["visibility"],
+                    "landmarks_normalized": payload.get("landmarks_normalized"),
+                    "landmarks_world": payload.get("landmarks_world"),
+                    "visibility": payload.get("visibility"),
                     "source": "vision",
                     "detected": payload["detected"],
                 }

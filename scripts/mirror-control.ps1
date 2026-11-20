@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "python-env.ps1")
 $runtimeDir = Join-Path $projectRoot "webdata\runtime"
 $statePath = Join-Path $runtimeDir "mirror-state.json"
 $liveLog = Join-Path $runtimeDir "live-engine.log"
@@ -19,7 +20,7 @@ $offlineErr = Join-Path $runtimeDir "offline-worker.err.log"
 $mirrorLog = Join-Path $runtimeDir "mirror.log"
 $mirrorErr = Join-Path $runtimeDir "mirror.err.log"
 $browserProfile = Join-Path $runtimeDir "browser-profile"
-$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$python = Resolve-VigorSyncPython -ProjectRoot $projectRoot
 $mirrorUrl = "http://127.0.0.1:8080"
 $liveHealth = "http://127.0.0.1:8020/api/v1/health"
 $coreHealth = "http://127.0.0.1:8011/api/v1/health"
@@ -173,7 +174,7 @@ if ($Action -eq "status") {
 }
 
 if (-not (Test-Path -LiteralPath $python)) {
-    throw "VigorSync .venv was not found at $python"
+    throw "VigorSync Python interpreter was not found at $python"
 }
 
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
@@ -189,6 +190,13 @@ if ($null -eq $state) {
         offlinePid = $null
         offlineAnalysisEnabled = $true
         browserProfile = $browserProfile
+    }
+}
+else {
+    foreach ($pidField in @("livePid", "mirrorPid", "corePid", "offlinePid")) {
+        if ($state.PSObject.Properties.Name -notcontains $pidField) {
+            $state | Add-Member -NotePropertyName $pidField -NotePropertyValue $null
+        }
     }
 }
 $state.startedAt = (Get-Date).ToString("o")
@@ -272,6 +280,9 @@ try {
         }
         $state.corePid = Get-PortOwner -Port 8011
     }
+    else {
+        $state.corePid = Get-PortOwner -Port 8011
+    }
 
     if (-not (Test-HttpOk -Url $liveHealth)) {
         if (Get-PortOwner -Port 8020) {
@@ -303,7 +314,7 @@ try {
         $state.livePid = Get-PortOwner -Port 8020
     }
     elseif (-not (Test-ExactProcess -ProcessId ([int]$state.livePid) -ExpectedText "vigorsync_live")) {
-        $state.livePid = $null
+        $state.livePid = Get-PortOwner -Port 8020
     }
 
     if (-not (Test-HttpOk -Url $mirrorUrl)) {
@@ -325,7 +336,7 @@ try {
         $state.mirrorPid = Get-PortOwner -Port 8080
     }
     elseif (-not (Test-ExactProcess -ProcessId ([int]$state.mirrorPid) -ExpectedText "apps\mirror\server.py")) {
-        $state.mirrorPid = $null
+        $state.mirrorPid = Get-PortOwner -Port 8080
     }
 
     $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8

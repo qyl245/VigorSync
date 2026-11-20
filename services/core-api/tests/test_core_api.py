@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 import sys
+from contextlib import closing
 import tempfile
+from datetime import datetime, timedelta
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -15,6 +19,7 @@ sys.path.insert(0, str(SRC))
 
 from vigorsync_core.app import create_app
 from vigorsync_core.config import Settings
+from vigorsync_core.discovery import build_discovery_response
 from vigorsync_core.db import Database
 
 
@@ -139,6 +144,7 @@ class CoreApiTests(unittest.TestCase):
             offline_data_root=root / "offline",
             mirror_token="mirror-test",
             pairing_code="123456",
+            discovery_enabled=False,
         )
         self.live = FakeLive(root)
         self.offline = FakeOffline()
@@ -279,6 +285,194 @@ class CoreApiTests(unittest.TestCase):
             any(item["type"] == "session.state" for item in events["items"])
         )
 
+    def test_pairing_devices_are_deduplicated_by_name(self) -> None:
+        again = self.client.post(
+            "/api/v1/pairing/claim",
+            json={
+                "pairing_code": "123456",
+                "device_name": "Test Phone",
+                "platform": "android",
+            },
+        )
+        self.assertEqual(200, again.status_code)
+        second = self.client.post(
+            "/api/v1/pairing/claim",
+            json={
+                "pairing_code": "123456",
+                "device_name": "Second Phone",
+                "platform": "android",
+            },
+        )
+        self.assertEqual(200, second.status_code)
+
+        devices = self.client.get(
+            "/api/v1/pairing/devices",
+            headers={"Authorization": f"Bearer {second.json()['token']}"},
+        ).json()["items"]
+
+        self.assertEqual(
+            ["Second Phone", "Test Phone"],
+            [item["device_name"] for item in devices],
+        )
+
+    def test_pairing_identity_and_current_token_revoke(self) -> None:
+        identity = self.client.get(
+            "/api/v1/pairing/me",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        self.assertEqual(200, identity.status_code)
+        self.assertEqual("Test Phone", identity.json()["device_name"])
+
+        revoked = self.client.delete(
+            "/api/v1/pairing/current",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        self.assertEqual(200, revoked.status_code)
+        self.assertTrue(revoked.json()["revoked"])
+        self.assertEqual(
+            401,
+            self.client.get(
+                "/api/v1/pairing/me",
+                headers={"Authorization": f"Bearer {self.token}"},
+            ).status_code,
+        )
+
+    def test_revoke_pairing_broadcasts_disconnected_state(self) -> None:
+        def receive_pairing_state(socket: Any) -> dict[str, Any]:
+            for _ in range(12):
+                message = socket.receive_json()
+                if message.get("type") == "pairing.state":
+                    return message
+            self.fail("mirror websocket did not receive pairing.state")
+
+        with self.client.websocket_connect(
+            "/api/v1/ws/mirror?token=mirror-test",
+        ) as mirror:
+            self.assertFalse(
+                receive_pairing_state(mirror)["payload"]["connected"],
+            )
+            with self.client.websocket_connect(
+                f"/api/v1/ws/client?token={self.token}",
+            ) as client_socket:
+                client_socket.receive_json()
+                self.assertTrue(
+                    receive_pairing_state(mirror)["payload"]["connected"],
+                )
+
+                revoked = self.client.delete(
+                    "/api/v1/pairing/current",
+                    headers={"Authorization": f"Bearer {self.token}"},
+                )
+                self.assertEqual(200, revoked.status_code)
+                self.assertTrue(revoked.json()["revoked"])
+                self.assertFalse(
+                    receive_pairing_state(mirror)["payload"]["connected"],
+                )
+
+    def test_discovery_response_contains_no_secret(self) -> None:
+        response = build_discovery_response(
+            core_ip="192.168.1.20",
+            core_port=8011,
+            device_name="客厅镜端",
+        )
+        self.assertEqual("http://192.168.1.20:8011", response["core_url"])
+        self.assertEqual("vigorsync-core", response["service"])
+        self.assertNotIn("token", response)
+
+    def test_cancel_startup_removes_history_and_artifacts(self) -> None:
+        session = self.create_session()
+        session_id = session["session_id"]
+        auth_headers = {"Authorization": f"Bearer {self.token}"}
+        started = self.client.post(
+            f"/api/v1/sessions/{session_id}/start",
+            headers={**auth_headers, "Idempotency-Key": "cancel-start"},
+        )
+        self.assertEqual(200, started.status_code, started.text)
+        self.assertEqual("preparing", started.json()["status"])
+
+        session_dir = self.settings.session_root / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "partial.mp4").write_bytes(b"partial")
+
+        cancel_headers = {
+            **auth_headers,
+            "Idempotency-Key": "cancel-preparing",
+        }
+        cancelled = self.client.post(
+            f"/api/v1/sessions/{session_id}/cancel",
+            headers=cancel_headers,
+        )
+        self.assertEqual(200, cancelled.status_code, cancelled.text)
+        self.assertEqual("cancelled", cancelled.json()["status"])
+        self.assertFalse(session_dir.exists())
+
+        missing = self.client.get(
+            f"/api/v1/sessions/{session_id}",
+            headers=auth_headers,
+        )
+        self.assertEqual(404, missing.status_code, missing.text)
+        sessions = self.client.get(
+            "/api/v1/sessions",
+            headers=auth_headers,
+        ).json()["items"]
+        self.assertNotIn(
+            session_id,
+            {item["session_id"] for item in sessions},
+        )
+        trend = self.client.get(
+            "/api/v1/stats/trend",
+            headers=auth_headers,
+        ).json()["days"]
+        self.assertTrue(all(day["sessions"] == 0 for day in trend))
+
+        repeated = self.client.post(
+            f"/api/v1/sessions/{session_id}/cancel",
+            headers=cancel_headers,
+        )
+        self.assertEqual(cancelled.json(), repeated.json())
+        self.assertEqual(
+            1,
+            sum(call == ("stop", session_id) for call in self.live.calls),
+        )
+    def test_cancel_after_training_starts_is_rejected(self) -> None:
+        session = self.create_session()
+        session_id = session["session_id"]
+        auth_headers = {"Authorization": f"Bearer {self.token}"}
+        started = self.client.post(
+            f"/api/v1/sessions/{session_id}/start",
+            headers={**auth_headers, "Idempotency-Key": "active-cancel-start"},
+        )
+        self.assertEqual(200, started.status_code, started.text)
+        active = self.client.post(
+            f"/api/v1/internal/sessions/{session_id}/state",
+            json={
+                "status": "active",
+                "t_ms": 0,
+                "payload": {
+                    "exercise": "squat",
+                    "phase": "up",
+                    "reps": 0,
+                    "confidence": 0.9,
+                    "fps": 18.0,
+                    "paused": False,
+                },
+            },
+        )
+        self.assertEqual(200, active.status_code, active.text)
+
+        cancelled = self.client.post(
+            f"/api/v1/sessions/{session_id}/cancel",
+            headers={**auth_headers, "Idempotency-Key": "active-cancel"},
+        )
+        self.assertEqual(409, cancelled.status_code, cancelled.text)
+        self.assertEqual("invalid_transition", cancelled.json()["error"]["code"])
+        detail = self.client.get(
+            f"/api/v1/sessions/{session_id}",
+            headers=auth_headers,
+        )
+        self.assertEqual(200, detail.status_code, detail.text)
+        self.assertEqual("active", detail.json()["status"])
+
     def test_create_and_start_is_one_idempotent_call(self) -> None:
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -417,6 +611,32 @@ class CoreApiTests(unittest.TestCase):
             snapshot = websocket.receive_json()
         self.assertEqual("session.snapshot", snapshot["type"])
         self.assertIsNotNone(snapshot["payload"])
+
+    def test_mirror_theme_is_persisted_and_replayed(self) -> None:
+        response = self.client.post(
+            "/api/v1/control/theme",
+            headers={"Authorization": f"Bearer {self.token}"},
+            json={"mode": "light"},
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(
+            {"mode": "light", "delivered": True},
+            response.json(),
+        )
+
+        with self.client.websocket_connect(
+            "/api/v1/ws/mirror",
+            subprotocols=[
+                "vigorsync.v1",
+                "vigorsync.token.mirror-test",
+            ],
+        ) as websocket:
+            messages = [websocket.receive_json() for _ in range(6)]
+        themes = [
+            message for message in messages if message["type"] == "mirror.theme"
+        ]
+        self.assertEqual(1, len(themes))
+        self.assertEqual({"mode": "light"}, themes[0]["payload"])
 
     def test_mobile_websocket_accepts_bearer_header(self) -> None:
         self.create_session()
@@ -576,6 +796,300 @@ class CoreApiTests(unittest.TestCase):
             headers={"Authorization": f"Bearer {self.token}"},
         ).json()["items"]
         self.assertNotIn(session_id, {item["session_id"] for item in listed})
+
+    def test_daily_trend_uses_summary_duration_and_timestamp_fallback(
+        self,
+    ) -> None:
+        database = Database(self.settings.db_path)
+        common = {
+            "exercise": "squat",
+            "view": "front",
+            "target_reps": 10,
+            "notes": None,
+        }
+        summary_duration = database.create_session(
+            session_id="s_trend_summary",
+            **common,
+        )
+        elapsed_duration = database.create_session(
+            session_id="s_trend_elapsed",
+            **common,
+        )
+        timestamp_duration = database.create_session(
+            session_id="s_trend_timestamp",
+            **common,
+        )
+        database.update_session(
+            summary_duration["session_id"],
+            status="completed",
+            live_summary={
+                "reps": 3,
+                "duration_s": 10,
+                "elapsed_s": 99,
+            },
+        )
+        database.update_session(
+            elapsed_duration["session_id"],
+            status="completed",
+            live_summary={"reps": 4, "elapsed_s": 12.5},
+        )
+        ended = datetime.now().astimezone().replace(microsecond=0)
+        started = ended - timedelta(seconds=65)
+        database.update_session(
+            timestamp_duration["session_id"],
+            status="completed",
+            started_at=started.isoformat(),
+            ended_at=ended.isoformat(),
+            live_summary={"reps": 5},
+        )
+
+        today = ended.date().isoformat()
+        today_bucket = next(
+            item
+            for item in database.daily_trend(7)
+            if item["date"] == today
+        )
+        self.assertEqual(3, today_bucket["sessions"])
+        self.assertEqual(12, today_bucket["reps"])
+        self.assertAlmostEqual(87.5, today_bucket["duration_s"])
+
+    def test_todo_crud_and_two_day_retention(self) -> None:
+        create_headers = {"Authorization": f"Bearer {self.token}"}
+        created = self.client.post(
+            "/api/v1/todos",
+            headers=create_headers,
+            json={"title": "  喝水  "},
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        todo = created.json()
+        self.assertEqual("喝水", todo["title"])
+        self.assertFalse(todo["completed"])
+
+        listed = self.client.get(
+            "/api/v1/todos",
+            headers=create_headers,
+        ).json()
+        self.assertEqual(1, listed["total"])
+        self.assertEqual(0, listed["completed"])
+
+        completed = self.client.patch(
+            f"/api/v1/todos/{todo['id']}",
+            headers=create_headers,
+            json={"completed": True},
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+        listed = self.client.get(
+            "/api/v1/todos",
+            headers=create_headers,
+        ).json()
+        self.assertEqual(1, listed["completed"])
+
+        database = Database(self.settings.db_path)
+        today = datetime.now().astimezone().date()
+        yesterday = (today - timedelta(days=1)).isoformat()
+        expired = (today - timedelta(days=2)).isoformat()
+        database.create_todo(
+            todo_id="t_retained_yesterday",
+            title="昨日",
+            todo_date=yesterday,
+        )
+        now = "2026-11-18T00:00:00.000Z"
+        with closing(sqlite3.connect(self.settings.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO todos (
+                    id, title, completed, todo_date, sort_order,
+                    created_at, updated_at
+                ) VALUES (?, ?, 0, ?, 0, ?, ?)
+                """,
+                ("t_expired", "过期", expired, now, now),
+            )
+            connection.commit()
+        database.list_todos()
+        with closing(sqlite3.connect(self.settings.db_path)) as connection:
+            ids = {
+                row[0]
+                for row in connection.execute("SELECT id FROM todos")
+            }
+        self.assertIn("t_retained_yesterday", ids)
+        self.assertNotIn("t_expired", ids)
+
+        deleted = self.client.delete(
+            f"/api/v1/todos/{todo['id']}",
+            headers=create_headers,
+        )
+        self.assertEqual(200, deleted.status_code, deleted.text)
+        self.assertEqual(
+            0,
+            self.client.get(
+                "/api/v1/todos",
+                headers=create_headers,
+            ).json()["total"],
+        )
+
+    def test_weekly_plan_crud_and_atomic_replace(self) -> None:
+        headers = {"Authorization": f"Bearer {self.token}"}
+        created = self.client.post(
+            "/api/v1/weekly-plans",
+            headers=headers,
+            json={
+                "weekday": 1,
+                "exercise": "squat",
+                "view": "front",
+                "sets": 4,
+                "target_reps": 12,
+                "note": "动作放慢",
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual("squat", created.json()["exercise"])
+
+        replaced = self.client.put(
+            "/api/v1/weekly-plans",
+            headers=headers,
+            json={
+                "items": [
+                    {
+                        "weekday": 1,
+                        "exercise": "pushup",
+                        "target_reps": 10,
+                    },
+                    {
+                        "weekday": 1,
+                        "exercise": "squat",
+                        "target_reps": 15,
+                        "sort_order": 1,
+                    },
+                    {
+                        "weekday": 7,
+                        "exercise": "squat",
+                        "view": "side_left",
+                        "sets": 3,
+                        "target_reps": 8,
+                    },
+                ]
+            },
+        )
+        self.assertEqual(200, replaced.status_code, replaced.text)
+        items = replaced.json()["items"]
+        self.assertEqual(3, len(items))
+        self.assertEqual(
+            ["pushup", "squat", "squat"],
+            [item["exercise"] for item in items],
+        )
+
+        plan_id = items[0]["id"]
+        updated = self.client.patch(
+            f"/api/v1/weekly-plans/{plan_id}",
+            headers=headers,
+            json={
+                "weekday": 2,
+                "exercise": "pushup",
+                "view": "side_right",
+                "sets": 5,
+                "target_reps": 20,
+                "note": "最后一组降速",
+            },
+        )
+        self.assertEqual(200, updated.status_code, updated.text)
+        self.assertEqual(2, updated.json()["weekday"])
+
+        cleared = self.client.patch(
+            f"/api/v1/weekly-plans/{plan_id}",
+            headers=headers,
+            json={
+                "weekday": 2,
+                "exercise": "pushup",
+                "view": None,
+                "sets": None,
+                "target_reps": 20,
+                "note": None,
+            },
+        )
+        self.assertEqual(200, cleared.status_code, cleared.text)
+        self.assertIsNone(cleared.json()["view"])
+        self.assertIsNone(cleared.json()["sets"])
+        self.assertIsNone(cleared.json()["note"])
+
+        deleted = self.client.delete(
+            f"/api/v1/weekly-plans/{plan_id}",
+            headers=headers,
+        )
+        self.assertEqual(200, deleted.status_code, deleted.text)
+        current = self.client.get(
+            "/api/v1/weekly-plans",
+            headers=headers,
+        ).json()
+        self.assertEqual(2, len(current["items"]))
+
+    def test_legacy_layout_is_migrated_once(self) -> None:
+        legacy = {
+            "modules": [
+                {"id": "todo", "size": "1x2", "column": "left", "order": 0},
+                {"id": "trend", "size": "1x2", "column": "right", "order": 0},
+                {"id": "weather", "size": "1x2", "column": "right", "order": 1},
+            ]
+        }
+        with closing(sqlite3.connect(self.settings.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO mirror_layout (id, payload, updated_at)
+                VALUES (1, ?, ?)
+                """,
+                (
+                    json.dumps(legacy),
+                    "2026-11-17T00:00:00.000Z",
+                ),
+            )
+            connection.commit()
+        headers = {"Authorization": f"Bearer {self.token}"}
+        migrated = self.client.get(
+            "/api/v1/mirror/layout",
+            headers=headers,
+        ).json()
+        self.assertEqual(2, migrated["version"])
+        self.assertEqual(
+            {"weather", "trend", "todo", "weekly_plan"},
+            {module["id"] for module in migrated["modules"]},
+        )
+        weekly = next(
+            module for module in migrated["modules"]
+            if module["id"] == "weekly_plan"
+        )
+        self.assertEqual("left", weekly["column"])
+        self.assertEqual(1, weekly["order"])
+
+        reduced = self.client.put(
+            "/api/v1/mirror/layout",
+            headers=headers,
+            json={
+                "modules": [
+                    {
+                        "id": "weather",
+                        "size": "1x2",
+                        "column": "left",
+                        "order": 0,
+                    }
+                ]
+            },
+        ).json()
+        self.assertEqual(["weather"], [item["id"] for item in reduced["modules"]])
+        reread = self.client.get(
+            "/api/v1/mirror/layout",
+            headers=headers,
+        ).json()
+        self.assertEqual(["weather"], [item["id"] for item in reread["modules"]])
+
+    def test_default_layout_contains_all_four_modules(self) -> None:
+        layout = self.client.get(
+            "/api/v1/mirror/layout",
+            headers={"Authorization": f"Bearer {self.token}"},
+        ).json()
+        self.assertEqual(2, layout["version"])
+        self.assertEqual(
+            {"weather", "trend", "todo", "weekly_plan"},
+            {module["id"] for module in layout["modules"]},
+        )
 
     def test_offline_result_is_published_and_report_is_served(self) -> None:
         session = self.create_session()

@@ -81,6 +81,51 @@ def _run_script(job_dir: Path, args: list[str], log_name: str, timeout_s: int) -
         raise AppError("stage_failed", f"{log_name} 失败，退出码 {proc.returncode}，详见 logs/{log_name}.log", status_code=500)
 
 
+def _build_trajectory_overlay(
+    job_dir: Path, work_dir: Path, artifacts_root: Path, clip_id: str
+) -> str:
+    """Build the optional DTW trajectory payload consumed by the report."""
+    analysis_path = work_dir / clip_id / "analysis.json"
+    repo_root = config.ROOT.parents[3]
+    script = repo_root / "scripts" / "trajectory_compare.py"
+    if not analysis_path.is_file() or not script.is_file():
+        return "unavailable"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    templates_dir = repo_root / "reference_data" / "templates"
+    view = analysis.get("view") or ""
+    # Left and right side recordings are mirrors, so they share one standard.
+    family = "side" if view in {"side_left", "side_right"} else view
+    template = templates_dir / f"{analysis.get('exercise')}_{family}.json"
+    if not template.is_file():
+        return "no_template"
+    log_path = job_dir / "logs" / "trajectory.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        config.PYTHON_EXE,
+        str(script),
+        "--template",
+        str(template),
+        "--analysis-dir",
+        str(work_dir / clip_id),
+        "--output-dir",
+        str(artifacts_root / "trajectory" / clip_id),
+    ]
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(f"\n$ {' '.join(cmd)}\n")
+        log.flush()
+        proc = subprocess.run(
+            cmd,
+            cwd=str(repo_root),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            timeout=300,
+            check=False,
+        )
+    if proc.returncode == 2:
+        return "refused"
+    return "ok" if proc.returncode == 0 else "error"
+
+
 def _rewrite_analysis_outputs(clip_dir: Path) -> None:
     """Point copied fallback analysis at its published working directory."""
     path = clip_dir / "analysis.json"
@@ -333,6 +378,11 @@ def run_stages(job_id: str, request: dict[str, Any], on_stage: Callable[[str, di
     )
     on_stage("issues", {"output_dir": "work/feedback"})
 
+    artifacts_root = job_dir / "artifacts"
+    trajectory_status = _build_trajectory_overlay(
+        job_dir, work_dir, artifacts_root, job_id
+    )
+
     feedback_v2_dir = job_dir / "work" / "feedback_v2"
     on_stage("feedback_v2", {"event": "start", "output_dir": "work/feedback_v2"})
     _run_script(
@@ -347,14 +397,20 @@ def run_stages(job_id: str, request: dict[str, Any], on_stage: Callable[[str, di
             "--render-frames",
             "--media-url-template", f"/api/v1/jobs/{job_id}/media",
             "--frame-url-template", f"/api/v1/jobs/{job_id}/frames/{{frame_name}}",
+            "--trajectory-dir", str(artifacts_root / "trajectory"),
         ],
         "feedback_v2",
         config.JOB_TIMEOUT_S,
     )
-    on_stage("feedback_v2", {"output_dir": "work/feedback_v2"})
+    on_stage(
+        "feedback_v2",
+        {"output_dir": "work/feedback_v2", "trajectory": trajectory_status},
+    )
 
-    artifacts_root = job_dir / "artifacts"
-    on_stage("build_report", {"event": "start", "output_dir": "artifacts"})
+    on_stage(
+        "build_report",
+        {"event": "start", "output_dir": "artifacts", "trajectory": trajectory_status},
+    )
     _run_script(
         job_dir,
         [

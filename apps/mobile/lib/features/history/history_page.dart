@@ -8,18 +8,10 @@ import '../../widgets/exercise_glyph.dart';
 import '../report/report_page.dart';
 
 class HistoryPage extends StatefulWidget {
-  const HistoryPage({
-    super.key,
-    required this.api,
-    required this.refreshToken,
-    required this.isDarkMode,
-    required this.onToggleTheme,
-  });
+  const HistoryPage({super.key, required this.api, required this.refreshToken});
 
   final CoreApiClient api;
   final int refreshToken;
-  final bool isDarkMode;
-  final VoidCallback onToggleTheme;
 
   @override
   State<HistoryPage> createState() => _HistoryPageState();
@@ -94,26 +86,19 @@ class _HistoryPageState extends State<HistoryPage> {
         _deletingSessionId = null;
         _load();
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('训练记录及本机产物已删除')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('训练记录及本机产物已删除')));
     } on CoreApiException catch (error) {
       if (!mounted) return;
       setState(() => _deletingSessionId = null);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(error.message),
-          backgroundColor: palette.signal,
-        ),
+        SnackBar(content: Text(error.message), backgroundColor: palette.signal),
       );
     } catch (error) {
       if (!mounted) return;
       setState(() => _deletingSessionId = null);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$error'),
-          backgroundColor: palette.signal,
-        ),
+        SnackBar(content: Text('$error'), backgroundColor: palette.signal),
       );
     }
   }
@@ -146,10 +131,6 @@ class _HistoryPageState extends State<HistoryPage> {
                   ),
                 ),
                 const Spacer(),
-                ThemeModeButton(
-                  isDarkMode: widget.isDarkMode,
-                  onPressed: widget.onToggleTheme,
-                ),
               ],
             ),
             const SizedBox(height: 40),
@@ -221,9 +202,7 @@ class _HistoryCard extends StatelessWidget {
     final reps = (summary?['reps'] as num?)?.toInt();
     final confidence = (summary?['confidence'] as num?)?.toDouble();
     final duration = formatSessionDuration(summary?['duration_s']);
-    final startedAt = formatSessionTime(
-      session.startedAt ?? session.createdAt,
-    );
+    final startedAt = formatSessionTime(session.startedAt ?? session.createdAt);
     final palette = context.vigor;
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -281,9 +260,11 @@ class _HistoryCard extends StatelessWidget {
                   icon: Icon(
                     Icons.delete_outline,
                     size: 20,
-                    color: session.isActive || session.status == 'stopping'
-                        || (session.status == 'analyzing' &&
-                            session.jobId != null)
+                    color:
+                        session.isActive ||
+                            session.status == 'stopping' ||
+                            (session.status == 'analyzing' &&
+                                session.jobId != null)
                         ? palette.muted
                         : palette.signal,
                   ),
@@ -377,10 +358,7 @@ class _HistoryValue extends StatelessWidget {
             value,
             style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
           ),
-          Text(
-            label,
-            style: TextStyle(color: palette.muted, fontSize: 10),
-          ),
+          Text(label, style: TextStyle(color: palette.muted, fontSize: 10)),
         ],
       ),
     );
@@ -399,9 +377,7 @@ class _HistoryStatus extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
-        color: (active ? palette.accent : palette.muted).withValues(
-          alpha: 0.1,
-        ),
+        color: (active ? palette.accent : palette.muted).withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
@@ -428,16 +404,12 @@ class _HistoryMessage extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        border: Border.all(
-          color: isError ? palette.signal : palette.line,
-        ),
+        border: Border.all(color: isError ? palette.signal : palette.line),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Text(
         text,
-        style: TextStyle(
-          color: isError ? palette.signal : palette.muted,
-        ),
+        style: TextStyle(color: isError ? palette.signal : palette.muted),
       ),
     );
   }

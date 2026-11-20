@@ -16,8 +16,6 @@
     {"from": "paused", "to": "active", "trigger": "command.resume"},
     {"from": "active", "to": "stopping", "trigger": "command.stop"},
     {"from": "paused", "to": "stopping", "trigger": "command.stop"},
-    {"from": "active", "to": "cancelled", "trigger": "command.cancel"},
-    {"from": "paused", "to": "cancelled", "trigger": "command.cancel"},
     {"from": "stopping", "to": "analyzing", "trigger": "internal.finalize_accepted"},
     {"from": "analyzing", "to": "completed", "trigger": "internal.report_ready"},
     {"from": "created", "to": "failed", "trigger": "internal.start_failed"},

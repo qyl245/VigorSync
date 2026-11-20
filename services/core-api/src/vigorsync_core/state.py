@@ -13,8 +13,6 @@ COMMAND_TRANSITIONS = {
     "cancel": {
         "created": "cancelled",
         "preparing": "cancelled",
-        "active": "cancelled",
-        "paused": "cancelled",
     },
 }
 

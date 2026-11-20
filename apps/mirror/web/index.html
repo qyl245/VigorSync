@@ -5,12 +5,57 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b0d0c" />
     <title>VigorSync · 动作遥测</title>
+    <script>
+      try {
+        const savedTheme = localStorage.getItem("vigorsync.mirror.theme");
+        if (savedTheme === "light" || savedTheme === "dark") {
+          document.documentElement.dataset.theme = savedTheme;
+          document.documentElement.style.colorScheme = savedTheme;
+          document.querySelector('meta[name="theme-color"]').content =
+            savedTheme === "light" ? "#f3f1e8" : "#0b0d0c";
+        }
+      } catch {
+        // Local storage can be unavailable in locked-down kiosk profiles.
+      }
+    </script>
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="home.css" />
   </head>
   <body>
     <main class="mirror-shell">
-      <section id="setup-panel" class="setup-panel">
+      <section id="home-panel" class="home-panel">
+        <header class="home-header">
+          <div id="home-connection" class="home-connection">
+            <span class="home-connection-dot" aria-hidden="true"></span>
+            <span id="home-connection-text">手机未连接 · 配对码 482913</span>
+          </div>
+          <button
+            id="home-open-setup"
+            class="brand-mark home-brand-button"
+            type="button"
+            title="打开训练配置"
+            aria-label="打开训练配置"
+          >
+            V/S
+          </button>
+        </header>
+
+        <div class="home-modules" aria-label="镜端模块">
+          <div id="home-column-left" class="home-column"></div>
+          <div id="home-column-right" class="home-column"></div>
+        </div>
+
+        <footer class="home-footer">
+          <p id="home-motto" class="home-motto">让每一次发力可见</p>
+          <p class="home-datetime">
+            <span id="home-date">--月--日 周-</span>
+            <span id="home-time" class="home-time">--:--</span>
+          </p>
+        </footer>
+      </section>
+
+      <section id="setup-panel" class="setup-panel" hidden>
         <div class="setup-copy">
           <div class="brand-line">
             <span class="brand-mark" aria-hidden="true">V/S</span>
@@ -26,6 +71,9 @@
             <span><b>2</b> 种动作</span>
             <span><b>0</b> 云端依赖</span>
           </div>
+          <button id="setup-back-home" class="setup-back-home" type="button">
+            ← 返回首页
+          </button>
         </div>
 
         <form id="start-form" class="control-card">
@@ -157,8 +205,10 @@
           >
             语音开启
           </button>
-          <button id="pause-button" class="secondary-button" type="button">暂停</button>
-          <button id="stop-button" class="danger-button" type="button">结束训练</button>
+          <button id="prepare-button" class="secondary-button" type="button" disabled hidden>准备中…</button>
+          <button id="cancel-button" class="secondary-button" type="button" hidden>取消启动</button>
+          <button id="pause-button" class="secondary-button" type="button" hidden>暂停</button>
+          <button id="stop-button" class="danger-button" type="button" hidden>结束训练</button>
         </footer>
       </section>
 
@@ -206,6 +256,19 @@
         </div>
       </section>
     </main>
+
+    <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+      <div class="confirm-dialog-card">
+        <p class="eyebrow">CONFIRM ACTION</p>
+        <h2 id="confirm-title"></h2>
+        <p id="confirm-message" class="confirm-message"></p>
+        <div class="confirm-actions">
+          <button id="confirm-safe" class="secondary-button" type="button"></button>
+          <button id="confirm-danger" class="danger-button" type="button"></button>
+        </div>
+      </div>
+    </dialog>
     <script src="app.js"></script>
+    <script type="module" src="home.js"></script>
   </body>
 </html>

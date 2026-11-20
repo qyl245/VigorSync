@@ -4,10 +4,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+. (Join-Path $PSScriptRoot "python-env.ps1")
+$python = Resolve-VigorSyncPython -ProjectRoot $projectRoot
 
 if (-not (Test-Path -LiteralPath $python)) {
-    throw "VigorSync .venv was not found."
+    throw "VigorSync Python interpreter was not found."
 }
 
 $mode = if ($OneFile) { "--onefile" } else { "--onedir" }
