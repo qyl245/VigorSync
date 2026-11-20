@@ -191,7 +191,11 @@ def get_job_frame(job_id: str, frame_name: str) -> FileResponse:
 @router.get("/{job_id}/feedback-report")
 def get_job_feedback_report(job_id: str) -> FileResponse:
     path = artifacts.job_feedback_report_path(job_id)
-    return FileResponse(path, media_type="text/html", filename=path.name)
+    return FileResponse(
+        path,
+        media_type="text/html",
+        headers={"Content-Disposition": "inline"},
+    )
 
 
 @router.get("/{job_id}/report")
@@ -199,4 +203,8 @@ def get_job_report(job_id: str) -> FileResponse:
     path = artifacts.job_artifacts_dir(job_id) / "report.html"
     if not path.is_file():
         raise not_found("report_not_found", f"report not ready for job {job_id}")
-    return FileResponse(path, media_type="text/html", filename=path.name)
+    return FileResponse(
+        path,
+        media_type="text/html",
+        headers={"Content-Disposition": "inline"},
+    )

@@ -2982,6 +2982,8 @@ let timelineTrack=null;
 let timelineCursor=null;
 let repButtons=[];
 let evidenceButtons=[];
+let evidenceStopTime=null;
+let evidenceMonitor=0;
 
 function pct(value){{
   if(!duration)return 0;
@@ -3017,6 +3019,64 @@ function seekTo(value,label,autoplay=false){{
   if(label)watchStatus.textContent=label;
   syncTimeline();
   if(autoplay)player.play().catch(()=>{{}});
+}}
+
+function clearEvidenceStop(){{
+  if(evidenceMonitor){{
+    cancelAnimationFrame(evidenceMonitor);
+    evidenceMonitor=0;
+  }}
+  evidenceStopTime=null;
+}}
+
+function finishEvidencePlayback(){{
+  const stopTime=evidenceStopTime;
+  player.pause();
+  clearEvidenceStop();
+  if(stopTime!==null){{
+    const videoEnd=Number(player.duration)||stopTime;
+    player.currentTime=Math.min(Math.max(stopTime,0),videoEnd);
+  }}
+  watchStatus.textContent='证据区间播放完成';
+  syncTimeline();
+}}
+
+function monitorEvidencePlayback(){{
+  if(evidenceStopTime===null)return;
+  if(player.ended||player.currentTime>=evidenceStopTime-0.01){{
+    finishEvidencePlayback();
+    return;
+  }}
+  evidenceMonitor=requestAnimationFrame(monitorEvidencePlayback);
+}}
+
+function revealPlayback(){{
+  const visual=player.closest('.visual')||player;
+  visual.scrollIntoView({{behavior:'auto',block:'center'}});
+  player.focus({{preventScroll:true}});
+}}
+
+function playEvidenceInterval(start,end){{
+  const videoEnd=Number(player.duration)||duration||Number(end)||0;
+  const from=Math.min(Math.max(Number(start)||0,0),videoEnd);
+  const to=Math.min(Math.max(Number(end)||from,from),videoEnd);
+  clearEvidenceStop();
+  revealPlayback();
+  seekTo(from,`播放证据 · ${{from.toFixed(2)}}–${{to.toFixed(2)}}s`);
+  evidenceStopTime=to;
+  const playback=player.play();
+  if(playback&&typeof playback.then==='function'){{
+    playback.then(()=>{{
+      if(evidenceStopTime!==null&&!evidenceMonitor){{
+        evidenceMonitor=requestAnimationFrame(monitorEvidencePlayback);
+      }}
+    }}).catch(()=>{{
+      clearEvidenceStop();
+      watchStatus.textContent='浏览器阻止了证据区间播放，请再次点击';
+    }});
+  }}else{{
+    evidenceMonitor=requestAnimationFrame(monitorEvidencePlayback);
+  }}
 }}
 
 function renderTimeline(){{
@@ -3072,10 +3132,12 @@ function renderTimeline(){{
 for(const card of cards){{
   card.addEventListener('click',()=>{{
     const start=Number(card.dataset.start||card.dataset.anchor);
-    seekTo(start,`正在查看 ${{start.toFixed(2)}}s 证据`,true);
+    const end=Number(card.dataset.end||start);
+    playEvidenceInterval(start,end);
   }});
 }}
 
+player.addEventListener('pause',()=>{{if(!player.ended)clearEvidenceStop();}});
 player.addEventListener('timeupdate',syncTimeline);
 player.addEventListener('seeked',syncTimeline);
 renderTimeline();

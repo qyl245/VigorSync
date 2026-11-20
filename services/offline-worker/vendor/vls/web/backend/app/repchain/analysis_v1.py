@@ -400,16 +400,22 @@ def find_phase_cycle_boundaries(
     max_period_s: float,
 ) -> tuple[list[int], dict[str, Any]]:
     """Find top-to-top boundaries from pronounced phase troughs and high-level crossings."""
-    finite = phase_values[np.isfinite(phase_values)]
+    phase_values = np.asarray(phase_values, dtype=np.float64)
+    valid = np.isfinite(phase_values)
+    finite = phase_values[valid]
     if len(finite) < 5 or fps <= 0:
         return [], {"status": "fallback", "reason": "insufficient_phase_signal"}
-    p10, p90 = np.percentile(finite, [10, 90])
+    indexes = np.arange(len(phase_values))
+    # find_peaks does not tolerate NaN gaps. Pose dropouts near a squat bottom
+    # previously hid valid troughs and merged adjacent reps.
+    detected = np.interp(indexes, indexes[valid], finite)
+    p10, p90 = np.percentile(detected, [10, 90])
     dynamic_range = float(p90 - p10)
     if dynamic_range < 1e-8:
         return [], {"status": "fallback", "reason": "flat_phase_signal"}
     min_gap = max(4, int(round(0.35 * min_period_s * fps)))
     troughs, properties = find_peaks(
-        -phase_values,
+        -detected,
         distance=min_gap,
         prominence=0.55 * dynamic_range,
     )
@@ -452,6 +458,7 @@ def find_phase_cycle_boundaries(
         "phase_p10": float(p10),
         "phase_p90": float(p90),
         "high_threshold": high_threshold,
+        "interpolated_missing_frames": int((~valid).sum()),
         "trough_prominences": [
             float(value) for value in properties.get("prominences", [])[: len(boundaries) - 1]
         ],

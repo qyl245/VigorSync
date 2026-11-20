@@ -5,12 +5,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
 from vigorsync_offline import app as adapter  # noqa: F401
+from vigorsync_offline import realtime_bridge
 from vigorsync_offline.realtime_bridge import enrich_job_realtime_review
 
 
@@ -167,6 +169,121 @@ class RealtimeBridgeTests(unittest.TestCase):
         )
         self.assertEqual("missing", review["state"])
         self.assertEqual([], review["matched_codes"])
+
+    def test_stale_evidence_frame_reference_is_repaired(self) -> None:
+        self.write_inputs()
+        feedback_path = self.artifacts / "feedback_v2.json"
+        feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
+        feedback["cards"][0]["frame_filename"] = (
+            "pushup_hip_sag_01_frame_999.png"
+        )
+        feedback["cards"][0]["frame_available"] = True
+        feedback_path.write_text(
+            json.dumps(feedback, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        frame_dir = self.artifacts / "annotated_frames"
+        frame_dir.mkdir()
+        (frame_dir / "pushup_hip_sag_01_frame_88.png").write_bytes(b"png")
+
+        enrich_job_realtime_review(
+            self.job_dir,
+            adapter.PROJECT_ROOT,
+        )
+
+        repaired = json.loads(feedback_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            "pushup_hip_sag_01_frame_88.png",
+            repaired["cards"][0]["frame_filename"],
+        )
+        self.assertTrue(repaired["cards"][0]["frame_available"])
+
+    def test_motion_payload_survives_realtime_report_rebuild(self) -> None:
+        self.write_inputs()
+        (self.artifacts / "analysis.json").write_text(
+            json.dumps(
+                {
+                    "clip_id": self.job_id,
+                    "fps": 30.0,
+                    "view": "side_left",
+                    "exercise": "pushup",
+                }
+            ),
+            encoding="utf-8",
+        )
+        motion = {
+            "schema_version": "vls-motion-trace-v5",
+            "joints": [11, 12],
+            "frames": [],
+        }
+        with (
+            patch.object(
+                realtime_bridge,
+                "build_motion_payload",
+                return_value=motion,
+            ),
+            patch.object(
+                realtime_bridge,
+                "build_report_html",
+                return_value="<html>motion</html>",
+            ) as build_report,
+        ):
+            enrich_job_realtime_review(
+                self.job_dir,
+                adapter.PROJECT_ROOT,
+            )
+        self.assertIs(
+            motion,
+            build_report.call_args.kwargs["motion"],
+        )
+        saved = json.loads(
+            (self.artifacts / "motion_payload.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual("vls-motion-trace-v5", saved["schema_version"])
+
+    def test_trajectory_section_survives_realtime_report_rebuild(self) -> None:
+        self.write_inputs()
+        trajectory_dir = (
+            self.job_dir / "artifacts" / "trajectory" / self.job_id
+        )
+        trajectory_dir.mkdir(parents=True)
+        (trajectory_dir / "overlay.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "vigorsync-trajectory-comparison-v1",
+                    "angles": {"user": "left_knee_flexion"},
+                    "units": "degrees",
+                    "template_curve": [170.0, 120.0, 90.0],
+                    "progress": [0.0, 50.0, 100.0],
+                    "user_reps": [
+                        {
+                            "rep_id": 2,
+                            "curve": [168.0, 118.0, 92.0],
+                        }
+                    ],
+                    "excluded_reps": [],
+                    "dtw_band_hit_reps": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch.object(
+            realtime_bridge,
+            "build_report_html",
+            return_value="<html>trajectory</html>",
+        ) as build_report:
+            enrich_job_realtime_review(
+                self.job_dir,
+                adapter.PROJECT_ROOT,
+            )
+        trajectory_html = build_report.call_args.kwargs["trajectory_html"]
+        self.assertIn("DTW TRAJECTORY", trajectory_html)
+        self.assertIn("动作轨迹对比", trajectory_html)
+        self.assertTrue(
+            (self.artifacts / "trajectory" / "overlay.json").is_file()
+        )
 
 
 if __name__ == "__main__":

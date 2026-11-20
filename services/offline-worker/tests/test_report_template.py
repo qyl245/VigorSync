@@ -60,6 +60,19 @@ def synthetic_track():
 
 
 class ReportTemplateTests(unittest.TestCase):
+    def test_evidence_frame_font_renders_distinct_chinese_glyphs(self) -> None:
+        from PIL import Image, ImageDraw
+        from render_clip_report import load_font
+
+        font = load_font(28)
+
+        def glyph(char: str) -> np.ndarray:
+            image = Image.new("L", (64, 64))
+            ImageDraw.Draw(image).text((4, 4), char, font=font, fill=255)
+            return np.asarray(image)
+
+        self.assertFalse(np.array_equal(glyph("膝"), glyph("盖")))
+
     def test_branded_report_contains_summary_and_issue(self) -> None:
         feedback = {
             "clip_id": "job_test",
@@ -127,6 +140,11 @@ class ReportTemplateTests(unittest.TestCase):
         self.assertIn("\"rep_id\":8", html)
         self.assertIn("\"start_s\":15.666667", html)
         self.assertIn("player.addEventListener('timeupdate'", html)
+        self.assertIn("function playEvidenceInterval", html)
+        self.assertIn("function revealPlayback", html)
+        self.assertIn("visual.scrollIntoView", html)
+        self.assertIn("requestAnimationFrame(monitorEvidencePlayback)", html)
+        self.assertIn("证据区间播放完成", html)
         self.assertIn("3D POSE REVIEW", html)
         self.assertIn("3D 骨架", html)
         self.assertNotIn('id="motion-trace"', html)

@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from app.repchain.feedback_builder import (
+    build_motion_payload,
     build_report_html,
     build_report_timeline,
+    build_trajectory_section,
 )
 
 
@@ -167,6 +169,47 @@ def _refresh_complete_manifest(
     _write_json(complete_path, existing)
 
 
+def _sync_evidence_frame_references(
+    feedback: dict[str, Any],
+    artifacts_dir: Path,
+) -> None:
+    frame_dir = artifacts_dir / "annotated_frames"
+    for card in feedback.get("cards") or []:
+        issue_id = str(card.get("issue_id") or "")
+        filename = str(card.get("frame_filename") or "")
+        if filename and (frame_dir / filename).is_file():
+            card["frame_available"] = True
+            continue
+
+        anchor_frame = card.get("anchor_frame")
+        expected = (
+            f"{issue_id}_frame_{int(anchor_frame)}.png"
+            if anchor_frame is not None
+            else ""
+        )
+        if expected and (frame_dir / expected).is_file():
+            card["frame_filename"] = expected
+            card["frame_available"] = True
+            continue
+
+        prefix = f"{issue_id}_frame_"
+        candidates = (
+            sorted(
+                path.name
+                for path in frame_dir.iterdir()
+                if path.is_file() and path.name.startswith(prefix)
+            )
+            if frame_dir.is_dir()
+            else []
+        )
+        if len(candidates) == 1:
+            card["frame_filename"] = candidates[0]
+            card["frame_available"] = True
+        else:
+            card["frame_filename"] = None
+            card["frame_available"] = False
+
+
 def enrich_job_realtime_review(
     job_dir: Path,
     project_root: Path,
@@ -190,15 +233,42 @@ def enrich_job_realtime_review(
         project_root,
     )
     feedback["realtime_review"] = review
+    _sync_evidence_frame_references(feedback, artifacts_dir)
     _write_json(feedback_path, feedback)
     _write_json(artifacts_dir / "realtime_review.json", review)
 
     assessment = _read_json(assessment_path)
+    timeline = build_report_timeline(assessment)
+    analysis_path = artifacts_dir / "analysis.json"
+    analysis = _read_json(analysis_path) if analysis_path.is_file() else {}
+    try:
+        trajectory_html = build_trajectory_section(
+            artifacts_dir,
+            artifacts_dir.parent / "trajectory",
+            job_id,
+        )
+    except Exception:
+        trajectory_html = ""
+    motion = None
+    try:
+        if not analysis:
+            raise FileNotFoundError("analysis.json is unavailable")
+        motion = build_motion_payload(
+            job_dir / "work" / "analysis",
+            analysis,
+            timeline,
+        )
+    except Exception:
+        motion = None
+    if motion is not None:
+        _write_json(artifacts_dir / "motion_payload.json", motion)
     report_html = build_report_html(
         feedback,
         media_url=f"/api/v1/jobs/{job_id}/media",
         frame_url_template=f"/api/v1/jobs/{job_id}/frames/{{frame_name}}",
-        timeline=build_report_timeline(assessment),
+        timeline=timeline,
+        motion=motion,
+        trajectory_html=trajectory_html,
     )
     (artifacts_dir / "report_v2.html").write_text(
         report_html,
