@@ -19,10 +19,17 @@ from .angle import AngleObservation, pushup_posture_valid
 from .capture import FrameSource
 from .config import Settings
 from .core_reporter import CoreReporter
+from .cue_policy import KNOWN_SPEECH_TEXTS, CuePolicy, SpeechCue
 from .form_aggregator import FaultAggregator
 from .form_rules import FormFaultDetector
 from .overlay import draw_overlay, mirror_pose_for_display
 from .pose import PoseEstimator, PoseFrame
+from .speech import (
+    SilentSpeechBackend,
+    SpeechBackend,
+    SpeechQueue,
+    SystemSpeechBackend,
+)
 from .state_machine import (
     FormAlert,
     Phase,
@@ -87,6 +94,7 @@ class SessionRuntime:
         *,
         source_factory: Callable[[], FrameSource] | None = None,
         estimator_factory: Callable[[], PoseProcessor] | None = None,
+        speech_backend_factory: Callable[[], SpeechBackend] | None = None,
         recording_fps: float | None = None,
     ) -> None:
         self.request = request
@@ -141,6 +149,31 @@ class SessionRuntime:
         self._fault_aggregator = FaultAggregator()
         self._highlight_until_ms: dict[str, int] = {}
         self._alerts: Counter[str] = Counter()
+        self._cue_policy = CuePolicy(
+            min_confidence=settings.tts_min_confidence,
+            code_cooldown_ms=settings.tts_code_cooldown_ms,
+            global_cooldown_ms=settings.tts_global_cooldown_ms,
+        )
+        speech_backend = (
+            speech_backend_factory()
+            if speech_backend_factory is not None
+            else (
+                SystemSpeechBackend(
+                    project_root=settings.project_root,
+                    voice=settings.tts_voice,
+                    rate=settings.tts_rate,
+                    volume=settings.tts_volume,
+                )
+                if settings.tts_enabled
+                else SilentSpeechBackend()
+            )
+        )
+        self._speech = SpeechQueue(
+            speech_backend,
+            max_size=settings.tts_queue_size,
+            enabled=settings.tts_enabled,
+        )
+        self._speech_enabled_before_pause = settings.tts_enabled
         self._core_reporter: CoreReporter | None = None
 
         self._event_lock = threading.Lock()
@@ -217,6 +250,18 @@ class SessionRuntime:
         with self._status_lock:
             return dict(self._startup_timings)
 
+    @property
+    def speech_status(self) -> dict[str, Any]:
+        return self._speech.status()
+
+    def set_speech_enabled(self, enabled: bool) -> dict[str, Any]:
+        status = self._speech.set_enabled(enabled)
+        if self.status == "paused":
+            self._speech_enabled_before_pause = enabled
+        if not enabled:
+            self._cue_policy.reset()
+        return status
+
     def _record_startup_timing(self, name: str, milliseconds: float) -> None:
         with self._status_lock:
             self._startup_timings[name] = round(milliseconds, 3)
@@ -224,6 +269,7 @@ class SessionRuntime:
     def start(self) -> None:
         if self._capture_thread is not None:
             return
+        self._speech.warm(KNOWN_SPEECH_TEXTS)
         self.request.session_dir.joinpath("input").mkdir(parents=True, exist_ok=True)
         self.request.session_dir.joinpath("live").mkdir(parents=True, exist_ok=True)
         self._events_writer = JsonlWriter(self._artifacts["events_path"])
@@ -266,6 +312,9 @@ class SessionRuntime:
             self._status = "paused"
             self._state_machine.set_paused(True)
             self._fault_aggregator.reset()
+            self._cue_policy.reset()
+            self._speech_enabled_before_pause = self._speech.status()["enabled"]
+            self._speech.set_enabled(False)
             self._highlight_until_ms.clear()
             self._latest_metrics["paused"] = True
             self._latest_metrics["phase"] = Phase.UNKNOWN.value
@@ -284,6 +333,7 @@ class SessionRuntime:
             self._active_started_monotonic = time.monotonic()
             self._status = "active"
             self._state_machine.set_paused(False)
+            self._speech.set_enabled(self._speech_enabled_before_pause)
             self._latest_metrics["paused"] = False
         self._emit_state("active", "paused")
         if self._core_reporter is not None:
@@ -312,6 +362,7 @@ class SessionRuntime:
                 self._status = "stopping"
         if not was_failed:
             self._emit_state("stopping", previous)
+        self._speech.set_enabled(False)
         self._stop_event.set()
         self._join_threads()
         self._ended_at = utc_now()
@@ -569,6 +620,7 @@ class SessionRuntime:
                 estimator.close()
             if self._core_reporter is not None:
                 self._core_reporter.close()
+            self._speech.close()
             self._threads_done.set()
 
     def _record_landmark(
@@ -659,6 +711,14 @@ class SessionRuntime:
                     },
                     captured.t_ms,
                 )
+                if self._speech.accepts_cues:
+                    self._submit_speech_cue(
+                        self._cue_policy.rep_milestone(
+                            self._state_machine.reps,
+                            self.request.target_reps,
+                            captured.t_ms,
+                        )
+                    )
             elif isinstance(event, FormAlert):
                 self._mark_highlights(event.joints, captured.t_ms)
                 self._alerts[event.code] += 1
@@ -673,6 +733,17 @@ class SessionRuntime:
                     },
                     captured.t_ms,
                 )
+                if self._speech.accepts_cues:
+                    self._submit_speech_cue(
+                        self._cue_policy.form_alert(
+                            event,
+                            captured.t_ms,
+                        )
+                    )
+
+    def _submit_speech_cue(self, cue: SpeechCue | None) -> None:
+        if cue is not None:
+            self._speech.submit(cue)
 
     def _mark_highlights(
         self,

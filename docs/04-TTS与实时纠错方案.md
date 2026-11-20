@@ -319,7 +319,8 @@ class SpeechBackend(Protocol):
 
 第一版后端：
 
-- `Pyttsx3SpeechBackend`：Windows 开发机使用 SAPI。
+- `SystemSpeechBackend`：Windows 使用 `System.Speech` 合成中文 WAV，再通过系统
+  播放器输出，避免部分 Realtek/SAPI 驱动下直接播放静音。
 - `SilentSpeechBackend`：TTS 不可用或用户静音。
 
 Pi 阶段后端：
@@ -403,10 +404,20 @@ configs/issues/
 
 ### 9.2 M4.2：Windows 本地 TTS
 
-- 增加 `SpeechQueue`、`CuePolicy` 和 pyttsx3/SAPI 后端。
+- 增加 `SpeechQueue`、`CuePolicy` 和 Windows System.Speech/SAPI 后端。
 - 支持静音、停止、会话结束清理。
 - 普通问题 3–5 秒内最多播报一次。
 - 里程碑只在 5/10 次数或目标达成时播报。
+
+实现记录（2026-11-19）：
+
+- `speech.py` 提供 System.Speech WAV 后端、有界优先级队列和 silent fallback。
+- 固定短句会在会话启动时后台预热并缓存，播放线程不阻塞 Pose。
+- `cue_policy.py` 负责 0.75 置信度门槛、5 秒问题码冷却、3 秒全局冷却和里程碑。
+- 语音线程独立于 Pose 线程；暂停、静音和结束会停止当前语音并清空队列。
+- SAPI 初始化或播报异常只把语音状态切换为 `unavailable`，不影响训练主链路。
+- 镜端训练 HUD 增加语音开关，并可通过开发/内部接口读取和控制状态。
+- 使用固定视频和 fake backend 覆盖异步、队列淘汰、静音与故障隔离测试。
 
 验收：
 

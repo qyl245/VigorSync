@@ -29,6 +29,7 @@ const elements = {
   alert: document.querySelector("#alert"),
   alertKicker: document.querySelector("#alert-kicker"),
   alertMessage: document.querySelector("#alert-message"),
+  speechButton: document.querySelector("#speech-button"),
   pauseButton: document.querySelector("#pause-button"),
   stopButton: document.querySelector("#stop-button"),
   summaryReps: document.querySelector("#summary-reps"),
@@ -104,6 +105,77 @@ async function request(path, options = {}) {
     throw new Error(message);
   }
   return response.json();
+}
+
+function liveOrigin() {
+  if (!currentSession?.ws_url) return null;
+  try {
+    const url = new URL(currentSession.ws_url);
+    url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+async function liveRequest(path, options = {}) {
+  const origin = liveOrigin();
+  if (!origin) throw new Error("实时服务地址不可用");
+  const response = await fetch(`${origin}${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!response.ok) {
+    let message = `语音服务请求失败 (${response.status})`;
+    try {
+      const body = await response.json();
+      message = body.error?.message || body.detail || message;
+    } catch {
+      // Keep the HTTP status message.
+    }
+    throw new Error(message);
+  }
+  return response.json();
+}
+
+function updateSpeechStatus(status) {
+  const available = Boolean(status) && status.available !== false;
+  const enabled = available && status?.enabled !== false;
+  elements.speechButton.disabled = !available || !currentSession?.session_id;
+  elements.speechButton.dataset.enabled = String(enabled);
+  elements.speechButton.setAttribute("aria-pressed", String(enabled));
+  elements.speechButton.textContent = !available
+    ? "语音不可用"
+    : enabled
+      ? "语音开启"
+      : "语音已静音";
+}
+
+async function refreshSpeechStatus() {
+  if (!currentSession?.session_id) return;
+  const status = await liveRequest(
+    `/dev/v1/sessions/${currentSession.session_id}/speech`,
+  );
+  updateSpeechStatus(status);
+}
+
+async function toggleSpeech() {
+  if (!currentSession?.session_id || elements.speechButton.disabled) return;
+  elements.speechButton.disabled = true;
+  try {
+    const enabled = elements.speechButton.dataset.enabled !== "true";
+    const status = await liveRequest(
+      `/dev/v1/sessions/${currentSession.session_id}/speech`,
+      {
+        method: "POST",
+        body: JSON.stringify({ enabled }),
+      },
+    );
+    updateSpeechStatus(status);
+  } catch (error) {
+    showAlert(error.message);
+    refreshSpeechStatus().catch(() => updateSpeechStatus(null));
+  }
 }
 
 async function ensureBootstrap() {
@@ -212,6 +284,15 @@ function applyDraftConfig(config) {
 
 function isLiveStatus(status) {
   return ["created", "preparing", "active", "paused"].includes(status);
+}
+
+function updateStopButton(status) {
+  elements.stopButton.disabled = status === "stopping";
+  elements.stopButton.textContent = ["created", "preparing"].includes(status)
+    ? "取消启动"
+    : status === "stopping"
+      ? "正在结束…"
+      : "结束训练";
 }
 
 function resetMetrics() {
@@ -366,12 +447,18 @@ function handleSessionState(sessionId, payload) {
     elements.phaseLabel.textContent = "已暂停";
   } else if (status === "active") {
     elements.pauseButton.textContent = "暂停";
+    updateStopButton(status);
     setConnection("实时连接", true);
+  } else if (["created", "preparing"].includes(status)) {
+    updateStopButton(status);
+  } else if (status === "stopping") {
+    updateStopButton(status);
   } else if (status === "failed") {
     setConnection("发生错误");
-    elements.analysisStatusText.textContent = "分析失败";
-    elements.analysisProgressBar.style.width = "0%";
-    showAlert("训练或离线分析发生错误，请查看历史记录。");
+    showSummary(sessionId).catch((error) => {
+      restart();
+      showSetupError(error.message || "训练发生错误，请重新开始。");
+    });
   } else if (["analyzing", "completed", "cancelled"].includes(status)) {
     showSummary(sessionId).catch((error) => {
       setConnection("会话已结束");
@@ -465,7 +552,9 @@ async function attachSession(session, { waitForReady = true } = {}) {
   }
   elements.pauseButton.textContent =
     currentSession.status === "paused" ? "继续" : "暂停";
+  updateStopButton(currentSession.status);
   elements.repCluster.classList.remove("target-hit");
+  refreshSpeechStatus().catch(() => updateSpeechStatus(null));
 
   if (elements.stream.dataset.sessionId !== currentSession.session_id) {
     if (currentSession.stream_url) {
@@ -567,19 +656,34 @@ async function togglePause() {
 
 async function stopSession() {
   if (!currentSession) return;
+  const cancelling = ["created", "preparing"].includes(
+    currentSession.status,
+  );
+  const action = cancelling ? "cancel" : "stop";
   elements.stopButton.disabled = true;
-  elements.stopButton.textContent = "正在结束…";
+  elements.stopButton.textContent = cancelling ? "正在取消…" : "正在结束…";
   try {
     const result = await request(
-      `/dev/v1/sessions/${currentSession.session_id}/stop`,
+      `/dev/v1/sessions/${currentSession.session_id}/${action}`,
       { method: "POST", body: "{}" },
     );
     await showSummary(result.session_id, result);
   } catch (error) {
-    showAlert(error.message);
+    try {
+      const detail = await request(
+        `/dev/v1/sessions/${currentSession.session_id}`,
+      );
+      if (["completed", "cancelled", "failed"].includes(detail.status)) {
+        await showSummary(detail.session_id, detail);
+      } else {
+        showAlert(error.message);
+      }
+    } catch {
+      showAlert(error.message);
+    }
   } finally {
     elements.stopButton.disabled = false;
-    elements.stopButton.textContent = "结束训练";
+    updateStopButton(currentSession?.status);
   }
 }
 
@@ -618,7 +722,13 @@ async function showSummary(sessionId, detail = null) {
   elements.openReportButton.hidden = true;
   elements.analysisFinding.hidden = true;
   elements.analysisStatusText.textContent =
-    analysisStageNames[session.analysis?.stage] || session.analysis?.stage || "queued";
+    session.status === "failed"
+      ? "训练失败"
+      : session.status === "cancelled"
+        ? "训练已取消"
+        : analysisStageNames[session.analysis?.stage] ||
+          session.analysis?.stage ||
+          "queued";
   elements.analysisProgressBar.style.width =
     `${Math.round((Number(session.analysis?.progress) || 0) * 100)}%`;
   if (session.report_url) {
@@ -641,10 +751,13 @@ function restart() {
   elements.setupPanel.hidden = false;
   elements.setupError.textContent = "";
   elements.pauseButton.textContent = "暂停";
+  updateStopButton(null);
+  updateSpeechStatus(null);
   elements.openReportButton.hidden = true;
 }
 
 elements.startForm.addEventListener("submit", startSession);
+elements.speechButton.addEventListener("click", toggleSpeech);
 elements.pauseButton.addEventListener("click", togglePause);
 elements.stopButton.addEventListener("click", stopSession);
 elements.restartButton.addEventListener("click", restart);

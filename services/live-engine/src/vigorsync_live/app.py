@@ -46,6 +46,10 @@ class SessionStartPayload(BaseModel):
     video_path: str | None = None
 
 
+class SpeechControlPayload(BaseModel):
+    enabled: bool
+
+
 def _require_internal_token(
     token: Annotated[str | None, Header(alias="X-Internal-Token")] = None,
 ) -> None:
@@ -78,6 +82,7 @@ def _session_payload(runtime: SessionRuntime) -> dict:
         "metrics": runtime.latest_metrics,
         "counts": runtime.counts,
         "startup_timings": runtime.startup_timings,
+        "speech": runtime.speech_status,
         "error": runtime.error,
     }
 
@@ -203,6 +208,31 @@ async def stop_internal(session_id: str) -> dict:
         raise HTTPException(status_code=404, detail="session not found") from exc
 
 
+@app.get(
+    "/internal/v1/sessions/{session_id}/speech",
+    dependencies=[Depends(_require_internal_token)],
+)
+def speech_status_internal(session_id: str) -> dict:
+    try:
+        return manager.get(session_id).speech_status
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="session not found") from exc
+
+
+@app.post(
+    "/internal/v1/sessions/{session_id}/speech",
+    dependencies=[Depends(_require_internal_token)],
+)
+def speech_control_internal(
+    session_id: str,
+    payload: SpeechControlPayload,
+) -> dict:
+    try:
+        return manager.set_speech_enabled(session_id, payload.enabled)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="session not found") from exc
+
+
 @app.post("/dev/v1/sessions")
 def start_dev(payload: SessionStartPayload, request: Request) -> dict:
     if not settings.enable_dev_api:
@@ -248,6 +278,28 @@ async def stop_dev(session_id: str, request: Request) -> dict:
     _require_loopback(request)
     try:
         return await asyncio.to_thread(manager.stop, session_id)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="session not found") from exc
+
+
+@app.get("/dev/v1/sessions/{session_id}/speech")
+def speech_status_dev(session_id: str, request: Request) -> dict:
+    _require_loopback(request)
+    try:
+        return manager.get(session_id).speech_status
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="session not found") from exc
+
+
+@app.post("/dev/v1/sessions/{session_id}/speech")
+def speech_control_dev(
+    session_id: str,
+    payload: SpeechControlPayload,
+    request: Request,
+) -> dict:
+    _require_loopback(request)
+    try:
+        return manager.set_speech_enabled(session_id, payload.enabled)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="session not found") from exc
 

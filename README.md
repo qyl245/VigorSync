@@ -1,7 +1,7 @@
 # VigorSync
 
 面向家庭健身镜的产品工作区。M0 方案与契约已冻结，M1 本机实时闭环、
-M2 手机控制闭环和 M3 离线分析闭环已落地。
+M2 手机控制闭环、M3 离线分析闭环和 M4.1–M4.2 实时纠错/Windows TTS 已落地。
 
 ## 工作区定位
 
@@ -66,8 +66,8 @@ $env:PYTHONPATH = "services\live-engine\src"
 .\.venv\Scripts\python.exe apps\mirror\server.py
 ```
 
-浏览器打开 `http://127.0.0.1:8080`。默认摄像头索引为 `0`，可通过
-`VIGORSYNC_CAMERA_INDEX` 切换；完整配置和开发/契约接口见
+浏览器打开 `http://127.0.0.1:8080`。当前项目默认摄像头索引为 `1`（USB 彩色摄像头），
+可通过 `VIGORSYNC_CAMERA_INDEX` 覆盖；完整配置和开发/契约接口见
 [Live Engine 说明](services/live-engine/README.md)。
 
 也可以直接双击一键启动/关闭：
@@ -193,7 +193,8 @@ VigorSync/
   点击到 `active` 实测约 `3.6 s`
 - 实时推理默认限制为 20 FPS，只处理最新帧；可通过 `VIGORSYNC_INFERENCE_FPS` 调整
 - MJPEG 预览和骨架合成默认限制为 15 FPS；可通过 `VIGORSYNC_PREVIEW_FPS` 调整
-- 下一步：完善 M3 异常恢复和真机报告体验，再进行产品化补强
+- Windows 镜端使用本地 SAPI 播放稳定纠错和 5/10/目标里程碑，支持即时静音
+- 下一步：完成 M4.3 的 Pi 离线语音后端和资源检查
 
 M3 已打通：手机和镜端继续通过 Core 控制训练；停止后 Core 自动提交 Offline
 Worker，RepChain 生成离线摘要、问题卡和证据报告，并把进度与结果推回手机和镜端。

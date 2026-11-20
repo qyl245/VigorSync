@@ -305,6 +305,28 @@ class CoreApiTests(unittest.TestCase):
             len([call for call in self.live.calls if call[0] == "start"]),
         )
 
+    def test_dev_cancel_is_available_while_preparing(self) -> None:
+        started = self.client.post(
+            "/dev/v1/sessions",
+            json={
+                "exercise": "squat",
+                "view": "front",
+                "target_reps": 10,
+            },
+        )
+        self.assertEqual(200, started.status_code, started.text)
+        self.assertEqual("preparing", started.json()["status"])
+
+        cancelled = self.client.post(
+            f"/dev/v1/sessions/{started.json()['session_id']}/cancel",
+            json={},
+        )
+        self.assertEqual(200, cancelled.status_code, cancelled.text)
+        self.assertEqual("cancelled", cancelled.json()["status"])
+        self.assertTrue(
+            any(call[0] == "stop" for call in self.live.calls),
+        )
+
     def test_offline_analysis_can_be_disabled_for_live_testing(self) -> None:
         root = Path(self.temp.name) / "disabled"
         settings = replace(

@@ -1,4 +1,4 @@
-# VigorSync Mirror M3
+# VigorSync Mirror
 
 无构建依赖的镜端训练页，用于 M2 的 Core 控制闭环验证。
 
@@ -33,7 +33,8 @@ cd E:\project\Exercise\VigorSync
 会话，直接显示 `8020` 端口的 MJPEG，并由 Core 转发会话事件。
 
 手机 UI 已位于 `apps/mobile/`，可完成配对、训练控制、历史查看和离线复盘。
-当前阶段尚未加入 TTS。
+Windows 镜端已接入本机 SAPI TTS，训练 HUD 可即时静音和恢复；语音由 Live Engine
+的独立有界队列播放，不会阻塞 Pose、计数、录像或页面状态。
 
 镜端页面默认处于跟随模式：打开页面后会自动连接 Core，手机启动训练时同步进入
 实时训练 HUD，并跟随暂停、继续和结束状态；刷新页面也会恢复当前活动会话。

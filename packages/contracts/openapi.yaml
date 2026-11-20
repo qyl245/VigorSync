@@ -455,6 +455,58 @@ components:
           $ref: ./common.schema.json#/$defs/LiveSummary
       additionalProperties: false
 
+    SpeechControlRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+      additionalProperties: false
+
+    SpeechStatus:
+      type: object
+      required:
+        - backend
+        - enabled
+        - available
+        - state
+        - queued
+        - queued_total
+        - spoken_total
+        - dropped_total
+        - current
+        - last_spoken
+        - last_error
+      properties:
+        backend:
+          type: string
+        enabled:
+          type: boolean
+        available:
+          type: boolean
+        state:
+          type: string
+          enum: [idle, warming, queued, speaking, muted, unavailable, closed]
+        queued:
+          type: integer
+          minimum: 0
+        queued_total:
+          type: integer
+          minimum: 0
+        spoken_total:
+          type: integer
+          minimum: 0
+        dropped_total:
+          type: integer
+          minimum: 0
+        current:
+          type: [string, 'null']
+        last_spoken:
+          type: [string, 'null']
+        last_error:
+          type: [string, 'null']
+      additionalProperties: false
+
     SessionSnapshotMessage:
       type: object
       required: [type, version, session_id, server_time, payload]
@@ -1223,6 +1275,56 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+
+  /internal/v1/sessions/{session_id}/speech:
+    get:
+      tags: [live-engine]
+      operationId: getLiveSpeechStatus
+      summary: Read local TTS queue and availability state
+      servers:
+        - url: http://127.0.0.1:8020
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Current speech state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpeechStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [live-engine]
+      operationId: setLiveSpeechEnabled
+      summary: Mute or resume local TTS for the active session
+      servers:
+        - url: http://127.0.0.1:8020
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeechControlRequest'
+      responses:
+        '200':
+          description: Updated speech state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpeechStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /live/{session_id}/stream.mjpg:
     get:

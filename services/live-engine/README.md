@@ -31,6 +31,41 @@ Live Engine 在 rep 状态机之外运行逐帧动作规则：
 稳定的 `form.alert`。告警携带 `joints`，MJPEG 骨骼图会直接高亮相应关节，
 镜端同步显示分级纠正短句。低可见度帧不会记为“无问题”，避免 Pose 抖动破坏窗口。
 
+## Windows 本地语音
+
+Windows 默认启用 `System.Speech` + SAPI 本地语音，并优先选择简体中文系统语音。
+短句会预生成为本地 WAV，再通过 Windows 系统播放器输出，绕过 SAPI 直接播放
+在某些驱动上“返回成功但无声”的问题。语音运行在独立线程中，不阻塞 Pose、录像或
+WebSocket：
+
+- 普通纠错要求置信度不低于 `0.75`。
+- 同一问题码至少间隔 5 秒，普通提示全局至少间隔 3 秒。
+- 只播报 5 次、10 次和目标达成里程碑。
+- 队列默认最多 4 条，满队列优先保留高严重度纠错。
+- 暂停或结束训练会停止当前语音并清空待播队列。
+- 固定纠错和里程碑短句会在会话启动时后台预热并缓存。
+- SAPI 初始化、WAV 合成或播放失败时自动停止语音功能，训练和计数继续。
+
+可用环境变量：
+
+```powershell
+$env:VIGORSYNC_TTS_ENABLED = "1"
+$env:VIGORSYNC_TTS_VOICE = "Huihui"
+$env:VIGORSYNC_TTS_RATE = "170"
+$env:VIGORSYNC_TTS_VOLUME = "1.0"
+$env:VIGORSYNC_TTS_QUEUE_SIZE = "4"
+$env:VIGORSYNC_TTS_MIN_CONFIDENCE = "0.75"
+```
+
+镜端训练 HUD 可即时静音和恢复；开发接口也可控制：
+
+```http
+GET  /dev/v1/sessions/{session_id}/speech
+POST /dev/v1/sessions/{session_id}/speech
+
+{"enabled": false}
+```
+
 服务默认只监听 `127.0.0.1:8020`。健康检查：
 
 ```powershell
@@ -50,6 +85,9 @@ $env:VIGORSYNC_CAMERA_WIDTH = "640"
 $env:VIGORSYNC_CAMERA_HEIGHT = "480"
 $env:VIGORSYNC_CAMERA_FPS = "30"
 ```
+
+Windows 默认使用索引 `1`，对应当前项目使用的 USB 彩色摄像头。若 Windows 重新枚举
+设备导致索引变化，可用 `VIGORSYNC_CAMERA_INDEX` 覆盖。
 
 默认模型复杂度为 `0`，即 MediaPipe Pose Lite，并使用 CPU 推理。Windows 默认使用
 首帧更快的 DirectShow；`VIGORSYNC_CAMERA_BACKEND` 可设为 `auto`、`dshow` 或 `msmf`。
@@ -72,7 +110,7 @@ MJPEG 与骨架合成默认限制为 `15 FPS`，可通过 `VIGORSYNC_PREVIEW_FPS
   也不会开始新的 rep 周期。若一帧关键点不可见，则回退到肩髋轴判断。
 - 状态机使用进入/退出双阈值、最短相位时间、置信度过滤、冷却时间和状态迁移防重复。
 - 实时结果是训练过程中的 provisional 计数；最终报告仍以离线 RepChain 为准。
-- 当前只产生深度不足提示，其他告警码保留到后续 M4/M5。
+- 当前实时提示覆盖深蹲膝内扣/前倾、俯卧撑塌腰/臀高/手肘外张，以及动作深度。
 
 ## 会话产物
 
@@ -98,6 +136,8 @@ GET  /dev/v1/sessions/{session_id}
 POST /dev/v1/sessions/{session_id}/pause
 POST /dev/v1/sessions/{session_id}/resume
 POST /dev/v1/sessions/{session_id}/stop
+GET  /dev/v1/sessions/{session_id}/speech
+POST /dev/v1/sessions/{session_id}/speech
 ```
 
 契约接口：
@@ -107,6 +147,8 @@ POST /internal/v1/sessions/{session_id}/start
 POST /internal/v1/sessions/{session_id}/pause
 POST /internal/v1/sessions/{session_id}/resume
 POST /internal/v1/sessions/{session_id}/stop
+GET  /internal/v1/sessions/{session_id}/speech
+POST /internal/v1/sessions/{session_id}/speech
 GET  /live/{session_id}/stream.mjpg
 WS   /ws/live/{session_id}
 ```

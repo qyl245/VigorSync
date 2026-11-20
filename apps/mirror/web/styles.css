@@ -664,6 +664,20 @@ input:focus {
   backdrop-filter: blur(12px);
 }
 
+.speech-button[data-enabled="true"] {
+  border-color: rgba(217, 255, 67, 0.45);
+  color: var(--acid);
+}
+
+.speech-button[data-enabled="false"] {
+  color: var(--amber);
+}
+
+.speech-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .danger-button {
   background: var(--signal);
   color: #240807;

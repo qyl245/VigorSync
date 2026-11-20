@@ -118,6 +118,14 @@ class SessionManager:
         runtime = self.get(session_id)
         return runtime.stop()
 
+    def set_speech_enabled(
+        self,
+        session_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        runtime = self.get(session_id)
+        return runtime.set_speech_enabled(enabled)
+
     def close_all(self) -> None:
         with self._lock:
             runtimes = list(self._sessions.values())

@@ -93,6 +93,25 @@ class FakePose:
         return None
 
 
+class RecordingSpeechBackend:
+    name = "recording-test"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def speak(self, text: str) -> None:
+        self.calls.append(text)
+
+    def warm(self, texts: tuple[str, ...]) -> None:
+        del texts
+
+    def stop(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 class RuntimeTests(unittest.TestCase):
     def test_runtime_writes_contract_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -326,6 +345,64 @@ class RuntimeTests(unittest.TestCase):
             time.sleep(0.2)
             result = runtime.stop()
             self.assertGreater(result["summary"]["elapsed_s"], paused_later + 0.1)
+
+    def test_runtime_speaks_target_milestone_and_disables_on_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings = Settings(
+                project_root=root,
+                session_root=root / "sessions",
+                host="127.0.0.1",
+                port=8020,
+                camera_index=0,
+                camera_width=64,
+                camera_height=48,
+                camera_fps=30,
+                camera_backend="auto",
+                jpeg_quality=80,
+                pose_model_complexity=0,
+                min_visibility=0.5,
+                metric_hz=5,
+                internal_token=None,
+                enable_dev_api=True,
+                allowed_origins=(),
+                inference_fps=120.0,
+                preview_fps=15.0,
+                tts_enabled=True,
+            )
+            request = SessionRequest(
+                session_id="s_speech_test",
+                exercise="squat",
+                view="side_left",
+                target_reps=1,
+                session_dir=root / "sessions" / "s_speech_test",
+                source_kind="video",
+            )
+            backend = RecordingSpeechBackend()
+            runtime = SessionRuntime(
+                request,
+                settings,
+                source_factory=lambda: FakeSource(),
+                estimator_factory=FakePose,
+                speech_backend_factory=lambda: backend,
+                recording_fps=30,
+            )
+            runtime.start()
+            deadline = time.monotonic() + 3
+            while (
+                runtime.status != "active"
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            time.sleep(1.85)
+            result = runtime.stop()
+
+            self.assertEqual("finalized", result["status"])
+            self.assertIn("目标完成", backend.calls)
+            speech = runtime.speech_status
+            self.assertGreaterEqual(speech["queued_total"], 1)
+            self.assertGreaterEqual(speech["spoken_total"], 1)
+            self.assertFalse(speech["enabled"])
 
 
 if __name__ == "__main__":

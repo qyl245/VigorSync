@@ -1136,6 +1136,10 @@ def create_app(
     async def dev_stop(session_id: str, request: Request) -> dict[str, Any]:
         return await dev_command(session_id, "stop", request)
 
+    @app.post("/dev/v1/sessions/{session_id}/cancel")
+    async def dev_cancel(session_id: str, request: Request) -> dict[str, Any]:
+        return await dev_command(session_id, "cancel", request)
+
     async def websocket_stream(
         websocket: WebSocket,
         channel: str,
