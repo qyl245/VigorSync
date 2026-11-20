@@ -1,11 +1,11 @@
 {
   "schema_version": "vls-confidence-calibration-v1",
-  "revision": "v1",
+  "revision": "v1.1-hash-realigned",
   "frozen": true,
   "core": {
     "dataset_independent": true,
     "calibrator_config": "configs/repchain_confidence.json",
-    "calibrator_sha256": "8289f512c03afe854dca437335149bc9e9778ff3eb8dc5128d2d58b5e1001ff3",
+    "calibrator_sha256": "2b4aa899fc8fb880e4f4b0374840ccd8ec7af1d9f19252254401e4a3c37cbcc5",
     "input_score": "rep.confidence.combined",
     "reported_layers": [
       "complete",
