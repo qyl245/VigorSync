@@ -7,8 +7,8 @@
       "family": "depth",
       "title": "下蹲深度不足",
       "short_cue": "下蹲深度不够",
-      "correction": "在可控范围内继续向下坐，同时保持膝盖朝向脚尖。",
-      "detail": "底部膝角或屈膝活动范围没有达到当前动作参考。",
+      "correction": "尝试在可控范围内再向下坐一些，同时保持膝盖朝向脚尖。",
+      "detail": "Squat bottom range is insufficient relative to the calibrated depth reference.",
       "default_severity": "medium",
       "live_joints": ["left_knee", "right_knee"],
       "offline_joints": ["left_hip", "right_hip", "left_knee", "right_knee"],
@@ -16,15 +16,15 @@
       "live_supported": true,
       "offline_supported": true,
       "offline_metrics": ["knee_flexion_rom", "bottom_knee_angle"],
-      "limitation": "深度结论需要侧视或斜侧机位。"
+      "limitation": "深度结论依赖侧视或斜侧视角；当前为工程阈值。"
     },
     {
       "code": "squat_torso_lean_excess",
       "family": "torso_control",
       "title": "躯干前倾过多",
       "short_cue": "胸口抬起",
-      "correction": "保持胸廓与骨盆大致叠放，不要用前倾代替髋部下沉。",
-      "detail": "肩髋连线相对垂直线偏离过多。",
+      "correction": "保持胸廓与骨盆大致叠放，减少用躯干前倾代替髋部下沉。",
+      "detail": "Torso leans forward beyond the calibrated bottom-position reference.",
       "default_severity": "medium",
       "live_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip"],
       "offline_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip"],
@@ -32,15 +32,15 @@
       "live_supported": true,
       "offline_supported": true,
       "offline_metrics": ["torso_lean_bottom"],
-      "limitation": "前倾角度受机位和拍摄方向影响。"
+      "limitation": "躯干前倾需要侧视或斜侧视角，且受拍摄角度影响。"
     },
     {
       "code": "squat_knee_valgus",
       "family": "knee_alignment",
       "title": "膝盖内扣",
       "short_cue": "膝盖向外",
-      "correction": "下蹲时让膝盖继续朝向脚尖，并适当放慢离心阶段。",
-      "detail": "膝盖相对脚踝向身体中线偏移。",
+      "correction": "下蹲时让膝盖继续朝向脚尖，可适当减小负重并放慢离心阶段。",
+      "detail": "One or both knees move medially beyond the calibrated frontal-plane reference.",
       "default_severity": "high",
       "live_joints": ["left_knee", "right_knee"],
       "offline_joints": ["left_knee", "right_knee", "left_ankle", "right_ankle"],
@@ -48,15 +48,15 @@
       "live_supported": true,
       "offline_supported": true,
       "offline_metrics": ["knee_valgus_bottom"],
-      "limitation": "膝内扣仅在正面、背面或斜侧机位评估。"
+      "limitation": "膝内扣仅在正面、背面或斜侧视角下评估。"
     },
     {
       "code": "squat_asymmetry",
       "family": "symmetry",
       "title": "左右发力不对称",
       "short_cue": "两侧用力均匀",
-      "correction": "放慢动作并关注两侧同时发力。",
-      "detail": "左右膝或髋在底部的测量差异偏大。",
+      "correction": "放慢动作并关注两侧同时发力；若差异持续，建议降低负重或做单侧辅助练习。",
+      "detail": "Left/right knee or hip measurements show a repeated or large asymmetry.",
       "default_severity": "low",
       "live_joints": ["left_hip", "right_hip", "left_knee", "right_knee"],
       "offline_joints": ["left_hip", "right_hip", "left_knee", "right_knee"],
@@ -64,15 +64,15 @@
       "live_supported": false,
       "offline_supported": true,
       "offline_metrics": ["knee_asymmetry_bottom", "hip_asymmetry_bottom"],
-      "limitation": "二维左右差异不等同于力量差异。"
+      "limitation": "二维左右差会受机位偏转和遮挡影响，不等同于力量差异。"
     },
     {
       "code": "squat_tempo_inconsistent",
       "family": "tempo",
       "title": "动作节奏不一致",
       "short_cue": "保持节奏",
-      "correction": "使用稳定节拍完成下蹲和起身。",
-      "detail": "整组 rep 时长波动超过当前参考。",
+      "correction": "用稳定的节拍完成每一次下蹲和起身，避免突然加速或停顿。",
+      "detail": "Within-set rep duration variability is above the calibrated threshold.",
       "default_severity": "low",
       "live_joints": ["left_hip", "right_hip", "left_knee", "right_knee"],
       "offline_joints": ["left_hip", "right_hip", "left_knee", "right_knee"],
@@ -80,15 +80,15 @@
       "live_supported": false,
       "offline_supported": true,
       "offline_metrics": ["rep_duration_cv"],
-      "limitation": "节奏结果依赖 rep 边界准确性。"
+      "limitation": "节奏由冻结 rep 边界计算，边界误差会影响结果。"
     },
     {
       "code": "squat_stability_low",
       "family": "stability",
       "title": "底部稳定性不足",
       "short_cue": "保持稳定",
-      "correction": "在底部短暂停稳并保持核心收紧。",
-      "detail": "底部附近躯干测量波动偏大。",
+      "correction": "在底部短暂停稳，保持核心收紧，避免身体左右或前后晃动。",
+      "detail": "Torso/spine measurement is unstable around the bottom phase.",
       "default_severity": "low",
       "live_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip"],
       "offline_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip"],
@@ -96,7 +96,7 @@
       "live_supported": false,
       "offline_supported": true,
       "offline_metrics": ["spine_stability_bottom"],
-      "limitation": "稳定性目前作为诊断信号使用。"
+      "limitation": "稳定性使用底部附近信号方差，目前仅作为诊断信号。"
     }
   ]
 }

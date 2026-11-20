@@ -77,3 +77,15 @@ Core 在本机调用。
 
 结果中的 `realtime_review` 和产物 `realtime_review.json` 记录实时/离线匹配。
 没有事件文件的旧任务仍按原有流程分析。
+
+共享问题目录同步检查：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\sync_issue_configs.py --check
+```
+
+完整 M4.4 验收可附带固定 job：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\check_m4_4.ps1 -JobId job_realtime_c59b1b4d
+```

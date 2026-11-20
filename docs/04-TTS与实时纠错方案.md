@@ -469,7 +469,19 @@ configs/issues/
   `report_v2.html`；完成清单的哈希会随后处理结果刷新。
 - 没有实时事件的历史 job 保持正常分析，不因缺少关联文件失败。
 
-M4.4.3 将补充 VLS taxonomy/template 同步、跨端文案一致性检查和固定回放验收。
+实现记录（M4.4.3，2026-11-20）：
+
+- 新增 `scripts/sync_issue_configs.py`：`--check` 阻止共享目录与 Vendored VLS
+  配置漂移，`--write` 执行机械同步。
+- 12 个离线支持问题的标题、短句、纠正建议、限制、关节、视角和指标已对齐；
+  `pushup_hip_pike`、`pushup_elbow_flare` 明确保持在 VLS 之外。
+- VLS feedback template 增加 canonical `short_cue`。
+- 新增跨端一致性测试，检查双向问题码集合、缺项、实时-only 泄漏及文案/关节一致性。
+- 新增 `scripts/check_m4_4.ps1`，聚合同步检查、契约、Offline Worker、M3 回归；
+  `-JobId` 可校验真实报告中的实时关联标记。
+- 固定膝内扣样例 `job_realtime_c59b1b4d` 验收通过。
+
+M4.4 已完成。
 
 ## 10. 测试与指标
 

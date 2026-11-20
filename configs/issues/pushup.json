@@ -7,8 +7,8 @@
       "family": "depth",
       "title": "俯卧撑下放深度不足",
       "short_cue": "俯卧撑深度不够",
-      "correction": "在肩肘舒适的前提下增加下放幅度。",
-      "detail": "底部肘角或屈肘活动范围没有达到当前动作参考。",
+      "correction": "在肩肘舒适的前提下增加下放幅度，保持身体整体移动。",
+      "detail": "Push-up descent range is insufficient relative to the calibrated depth reference.",
       "default_severity": "medium",
       "live_joints": ["left_elbow", "right_elbow"],
       "offline_joints": ["left_elbow", "right_elbow", "left_shoulder", "right_shoulder"],
@@ -16,15 +16,15 @@
       "live_supported": true,
       "offline_supported": true,
       "offline_metrics": ["elbow_flexion_rom", "bottom_elbow_angle"],
-      "limitation": "深度结论需要侧视或斜侧机位。"
+      "limitation": "深度结论依赖侧视或斜侧视角；当前为工程阈值。"
     },
     {
       "code": "pushup_body_line_break",
       "family": "torso_control",
       "title": "身体直线保持不佳",
       "short_cue": "收紧核心",
-      "correction": "收紧核心和臀部，让肩、髋、踝保持在同一延长线上。",
-      "detail": "肩髋踝身体线偏离当前参考。",
+      "correction": "收紧核心和臀部，让肩、髋、踝尽量保持在同一延长线上。",
+      "detail": "Shoulder-hip-ankle body line breaks beyond the calibrated reference.",
       "default_severity": "medium",
       "live_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip"],
       "offline_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip", "left_ankle", "right_ankle"],
@@ -32,15 +32,15 @@
       "live_supported": false,
       "offline_supported": true,
       "offline_metrics": ["body_line_angle"],
-      "limitation": "身体直线判断依赖侧视机位和踝关节可见性。"
+      "limitation": "身体直线需要侧视或斜侧视角，并依赖关键点可见性。"
     },
     {
       "code": "pushup_hip_sag",
       "family": "torso_control",
-      "title": "塌腰",
+      "title": "塌腰或撅臀",
       "short_cue": "收紧核心",
-      "correction": "收紧核心并抬起髋部，保持身体线稳定。",
-      "detail": "髋部低于肩踝连线达到当前参考。",
+      "correction": "在动作全程保持骨盆稳定，避免腰部下塌或臀部抬高。",
+      "detail": "Local hip sag or pike is visible while the overall body line is otherwise supported.",
       "default_severity": "high",
       "live_joints": ["left_hip", "right_hip"],
       "offline_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip", "left_ankle", "right_ankle"],
@@ -48,7 +48,7 @@
       "live_supported": true,
       "offline_supported": true,
       "offline_metrics": ["hip_sag_ratio"],
-      "limitation": "离线的 hip_sag_ratio 与实时阈值不同。"
+      "limitation": "塌腰/撅臀与身体直线问题可能同时出现，当前规则优先合并。"
     },
     {
       "code": "pushup_hip_pike",
@@ -87,8 +87,8 @@
       "family": "symmetry",
       "title": "左右发力不对称",
       "short_cue": "两侧用力均匀",
-      "correction": "保持双手位置稳定并让两侧同时推起。",
-      "detail": "左右肘或肩在底部的测量差异偏大。",
+      "correction": "保持两手位置稳定并让两侧同时推起；若差异持续，建议降低难度。",
+      "detail": "Left/right elbow or shoulder measurements show a repeated or large asymmetry.",
       "default_severity": "low",
       "live_joints": ["left_elbow", "right_elbow", "left_shoulder", "right_shoulder"],
       "offline_joints": ["left_elbow", "right_elbow", "left_shoulder", "right_shoulder"],
@@ -96,15 +96,15 @@
       "live_supported": false,
       "offline_supported": true,
       "offline_metrics": ["elbow_asymmetry_bottom", "shoulder_asymmetry_bottom"],
-      "limitation": "二维左右差异不等同于力量差异。"
+      "limitation": "二维左右差会受机位偏转和遮挡影响，不等同于力量差异。"
     },
     {
       "code": "pushup_tempo_inconsistent",
       "family": "tempo",
       "title": "动作节奏不一致",
       "short_cue": "保持节奏",
-      "correction": "使用稳定节拍完成下放和推起。",
-      "detail": "整组 rep 时长波动超过当前参考。",
+      "correction": "用稳定的节拍完成每一次下放和推起，避免突然加速或停顿。",
+      "detail": "Within-set rep duration variability is above the calibrated threshold.",
       "default_severity": "low",
       "live_joints": ["left_elbow", "right_elbow", "left_shoulder", "right_shoulder"],
       "offline_joints": ["left_elbow", "right_elbow", "left_shoulder", "right_shoulder"],
@@ -112,15 +112,15 @@
       "live_supported": false,
       "offline_supported": true,
       "offline_metrics": ["rep_duration_cv"],
-      "limitation": "节奏结果依赖 rep 边界准确性。"
+      "limitation": "节奏由冻结 rep 边界计算，边界误差会影响结果。"
     },
     {
       "code": "pushup_stability_low",
       "family": "stability",
       "title": "底部稳定性不足",
       "short_cue": "保持稳定",
-      "correction": "在底部短暂停稳并保持核心收紧。",
-      "detail": "底部附近躯干测量波动偏大。",
+      "correction": "在底部短暂停稳，保持核心收紧，避免身体左右或前后晃动。",
+      "detail": "Torso/spine measurement is unstable around the bottom phase.",
       "default_severity": "low",
       "live_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip"],
       "offline_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip"],
@@ -128,7 +128,7 @@
       "live_supported": false,
       "offline_supported": true,
       "offline_metrics": ["spine_stability_bottom"],
-      "limitation": "稳定性目前作为诊断信号使用。"
+      "limitation": "稳定性使用底部附近信号方差，目前仅作为诊断信号。"
     }
   ]
 }
