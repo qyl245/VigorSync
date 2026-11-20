@@ -31,6 +31,10 @@ Live Engine 在 rep 状态机之外运行逐帧动作规则：
 稳定的 `form.alert`。告警携带 `joints`，MJPEG 骨骼图会直接高亮相应关节，
 镜端同步显示分级纠正短句。低可见度帧不会记为“无问题”，避免 Pose 抖动破坏窗口。
 
+问题码、标题、实时严重度、关节、短句和离线能力声明来自仓库共享的
+`configs/issues/`。实时规则不再分别维护问题名称和文案；公共契约会校验其中的
+14 个 canonical code 与 `common.schema.json` 完全一致。
+
 ## Windows 本地语音
 
 Windows 默认启用 `System.Speech` + SAPI 本地语音，并优先选择简体中文系统语音。

@@ -445,6 +445,20 @@ configs/issues/
 - 报告问题卡引用实时出现过的同一问题。
 - 增加实时/离线问题码一致性测试。
 
+实现记录（M4.4.1，2026-11-20）：
+
+- 新增共享目录 `configs/issues/` 及 JSON Schema，包含深蹲 6 个、俯卧撑 8 个，
+  共 14 个 canonical issue code。
+- 每个问题统一声明实时/离线支持能力、关节、视角、短句、标题、纠正建议、
+  离线指标和限制说明。
+- `pushup_hip_pike` 和 `pushup_elbow_flare` 明确为实时支持、离线暂未复核；
+  不会伪装成现有离线问题。
+- 实时 `FormFaultDetector`、深度提示和 TTS 预热文案改为读取共享目录。
+- 契约校验会检查目录 Schema、重复码、动作前缀、能力声明及
+  `common.schema.json#/$defs/IssueCode` 的一致性。
+
+M4.4.2 将补齐实时事件向 Offline Worker 的透传、问题码匹配和报告标记。
+
 ## 10. 测试与指标
 
 ### 10.1 单元测试

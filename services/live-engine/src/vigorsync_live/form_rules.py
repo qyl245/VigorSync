@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .angle import Landmark
+from .issue_catalog import catalog_for_exercise
 from .pose import PoseFrame
 from .state_machine import Phase
 
@@ -65,6 +66,7 @@ class FormFaultDetector:
         self.exercise = exercise
         self.view = view
         self.min_visibility = min_visibility
+        self._issues = catalog_for_exercise(exercise)
 
     def detect(
         self,
@@ -157,6 +159,21 @@ class FormFaultDetector:
         values = [point.visibility for point in points]
         return round(min(values), 6) if values else 0.0
 
+    def _fault(
+        self,
+        code: str,
+        confidence: float,
+        joints: Iterable[str] | None = None,
+    ) -> FormFault:
+        issue = self._issues[code]
+        return FormFault(
+            code=code,
+            severity=issue.default_severity,
+            message=issue.short_cue,
+            confidence=confidence,
+            joints=tuple(joints or issue.live_joints),
+        )
+
     def _squat_knee_valgus(
         self,
         landmarks: Iterable[Landmark],
@@ -195,12 +212,10 @@ class FormFaultDetector:
             return (), True
         return (
             (
-                FormFault(
-                    code="squat_knee_valgus",
-                    severity="high",
-                    message="膝盖向外",
-                    confidence=self._confidence(points.values()),
-                    joints=tuple(affected),
+                self._fault(
+                    "squat_knee_valgus",
+                    self._confidence(points.values()),
+                    affected,
                 ),
             ),
             True,
@@ -240,17 +255,9 @@ class FormFaultDetector:
             return (), True
         return (
             (
-                FormFault(
-                    code="squat_torso_lean_excess",
-                    severity="medium",
-                    message="胸口抬起",
-                    confidence=self._confidence(points.values()),
-                    joints=(
-                        "left_shoulder",
-                        "right_shoulder",
-                        "left_hip",
-                        "right_hip",
-                    ),
+                self._fault(
+                    "squat_torso_lean_excess",
+                    self._confidence(points.values()),
                 ),
             ),
             True,
@@ -306,12 +313,9 @@ class FormFaultDetector:
         if vertical_ratio > 0.065:
             return (
                 (
-                    FormFault(
-                        code="pushup_hip_sag",
-                        severity="high",
-                        message="收紧核心",
-                        confidence=confidence,
-                        joints=("left_hip", "right_hip"),
+                    self._fault(
+                        "pushup_hip_sag",
+                        confidence,
                     ),
                 ),
                 True,
@@ -319,12 +323,9 @@ class FormFaultDetector:
         if vertical_ratio < -0.08:
             return (
                 (
-                    FormFault(
-                        code="pushup_hip_pike",
-                        severity="medium",
-                        message="髋部放低",
-                        confidence=confidence,
-                        joints=("left_hip", "right_hip"),
+                    self._fault(
+                        "pushup_hip_pike",
+                        confidence,
                     ),
                 ),
                 True,
@@ -363,12 +364,10 @@ class FormFaultDetector:
             return (), True
         return (
             (
-                FormFault(
-                    code="pushup_elbow_flare",
-                    severity="high",
-                    message="手肘内收",
-                    confidence=self._confidence(points.values()),
-                    joints=tuple(affected),
+                self._fault(
+                    "pushup_elbow_flare",
+                    self._confidence(points.values()),
+                    affected,
                 ),
             ),
             True,

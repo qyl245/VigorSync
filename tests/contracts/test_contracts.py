@@ -57,6 +57,36 @@ class ContractTests(unittest.TestCase):
         )
         self.assertTrue(errors)
 
+    def test_issue_catalog_matches_contract_and_runtime_capabilities(
+        self,
+    ) -> None:
+        _, catalogs = contracts.load_issue_catalogs()
+        issues = [
+            issue
+            for catalog in catalogs.values()
+            for issue in catalog["issues"]
+        ]
+        self.assertEqual(
+            {
+                issue["code"]
+                for issue in issues
+                if issue["live_supported"]
+            },
+            {
+                "squat_depth_insufficient",
+                "squat_torso_lean_excess",
+                "squat_knee_valgus",
+                "pushup_depth_insufficient",
+                "pushup_hip_sag",
+                "pushup_hip_pike",
+                "pushup_elbow_flare",
+            },
+        )
+        self.assertEqual(
+            14,
+            len(contracts.issue_catalog_codes(catalogs)),
+        )
+
     def test_state_machine_rejects_terminal_transition(self) -> None:
         machine = copy.deepcopy(contracts.load_json(contracts.STATE_MACHINE_PATH))
         machine["transitions"].append(

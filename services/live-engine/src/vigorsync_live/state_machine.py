@@ -6,6 +6,8 @@ import secrets
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from .issue_catalog import catalog_for_exercise
+
 
 class Phase(StrEnum):
     UP = "up"
@@ -267,18 +269,13 @@ class StateMachine:
             self._last_rep_end_ms = t_ms
             if shallow:
                 code = f"{self.exercise}_depth_insufficient"
-                message = "下蹲深度不够" if self.exercise == "squat" else "俯卧撑深度不够"
+                issue = catalog_for_exercise(self.exercise)[code]
                 severity = "medium" if self._bottom_angle is not None else "low"
-                joints = (
-                    ("left_knee", "right_knee")
-                    if self.exercise == "squat"
-                    else ("left_elbow", "right_elbow")
-                )
                 events.append(
                     FormAlert(
                         code=code,
                         severity=severity,
-                        message=message,
+                        message=issue.short_cue,
                         confidence=round(
                             min(
                                 1.0,
@@ -290,7 +287,7 @@ class StateMachine:
                             ),
                             6,
                         ),
-                        joints=joints,
+                        joints=issue.live_joints,
                     )
                 )
 

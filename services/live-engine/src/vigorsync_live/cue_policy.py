@@ -7,20 +7,6 @@ from dataclasses import dataclass
 from .state_machine import FormAlert
 
 
-KNOWN_SPEECH_TEXTS = (
-    "膝盖向外",
-    "胸口抬起",
-    "收紧核心",
-    "髋部放低",
-    "手肘内收",
-    "下蹲深度不够",
-    "俯卧撑深度不够",
-    "完成五次",
-    "完成十次",
-    "目标完成",
-)
-
-
 @dataclass(frozen=True, slots=True)
 class SpeechCue:
     text: str

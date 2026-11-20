@@ -19,9 +19,10 @@ from .angle import AngleObservation, pushup_posture_valid
 from .capture import FrameSource
 from .config import Settings
 from .core_reporter import CoreReporter
-from .cue_policy import KNOWN_SPEECH_TEXTS, CuePolicy, SpeechCue
+from .cue_policy import CuePolicy, SpeechCue
 from .form_aggregator import FaultAggregator
 from .form_rules import FormFaultDetector
+from .issue_catalog import live_speech_texts
 from .overlay import draw_overlay, mirror_pose_for_display
 from .pose import PoseEstimator, PoseFrame
 from .speech import (
@@ -269,7 +270,7 @@ class SessionRuntime:
     def start(self) -> None:
         if self._capture_thread is not None:
             return
-        self._speech.warm(KNOWN_SPEECH_TEXTS)
+        self._speech.warm(live_speech_texts())
         self.request.session_dir.joinpath("input").mkdir(parents=True, exist_ok=True)
         self.request.session_dir.joinpath("live").mkdir(parents=True, exist_ok=True)
         self._events_writer = JsonlWriter(self._artifacts["events_path"])

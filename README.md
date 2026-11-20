@@ -194,7 +194,8 @@ VigorSync/
 - 实时推理默认限制为 20 FPS，只处理最新帧；可通过 `VIGORSYNC_INFERENCE_FPS` 调整
 - MJPEG 预览和骨架合成默认限制为 15 FPS；可通过 `VIGORSYNC_PREVIEW_FPS` 调整
 - Windows 镜端使用本地 SAPI 播放稳定纠错和 5/10/目标里程碑，支持即时静音
-- 下一步：完成 M4.3 的 Pi 离线语音后端和资源检查
+- M4.4.1 已建立实时/离线共享问题目录和 14 个 canonical issue code 的契约校验
+- 下一步：完成 M4.4.2 的实时事件透传与离线报告关联（M4.3 暂缓）
 
 M3 已打通：手机和镜端继续通过 Core 控制训练；停止后 Core 自动提交 Offline
 Worker，RepChain 生成离线摘要、问题卡和证据报告，并把进度与结果推回手机和镜端。

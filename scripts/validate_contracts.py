@@ -19,6 +19,8 @@ CONTRACTS_DIR = ROOT / "packages" / "contracts"
 EXAMPLES_DIR = CONTRACTS_DIR / "examples"
 OPENAPI_PATH = CONTRACTS_DIR / "openapi.yaml"
 STATE_MACHINE_PATH = CONTRACTS_DIR / "session-state-machine.json"
+ISSUES_DIR = ROOT / "configs" / "issues"
+ISSUE_SCHEMA_PATH = ISSUES_DIR / "schema.json"
 
 REQUIRED_PATHS = {
     "/api/v1/health",
@@ -270,6 +272,77 @@ def validate_state_machine(
     return errors
 
 
+def load_issue_catalogs() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    schema = load_json(ISSUE_SCHEMA_PATH)
+    catalogs = {
+        exercise: load_json(ISSUES_DIR / f"{exercise}.json")
+        for exercise in ("squat", "pushup")
+    }
+    return schema, catalogs
+
+
+def issue_catalog_codes(
+    catalogs: dict[str, dict[str, Any]],
+) -> set[str]:
+    return {
+        issue["code"]
+        for catalog in catalogs.values()
+        for issue in catalog["issues"]
+    }
+
+
+def validate_issue_catalogs() -> list[str]:
+    errors: list[str] = []
+    try:
+        schema, catalogs = load_issue_catalogs()
+        Draft202012Validator.check_schema(schema)
+    except Exception as exc:
+        return [f"configs/issues: cannot load schema: {exc}"]
+    validator = Draft202012Validator(schema)
+    seen: set[str] = set()
+    for expected_exercise, catalog in catalogs.items():
+        label = f"configs/issues/{expected_exercise}.json"
+        for message in (
+            f"{format_error_path(error)}: {error.message}"
+            for error in sorted(
+                validator.iter_errors(catalog),
+                key=lambda item: list(item.absolute_path),
+            )
+        ):
+            errors.append(f"{label}: {message}")
+        if catalog.get("exercise") != expected_exercise:
+            errors.append(f"{label}: exercise must be {expected_exercise}")
+            continue
+        for index, issue in enumerate(catalog.get("issues", [])):
+            code = issue.get("code", "")
+            if not code.startswith(f"{expected_exercise}_"):
+                errors.append(f"{label}[{index}]: code must match exercise")
+            if code in seen:
+                errors.append(f"{label}[{index}]: duplicate code {code}")
+            seen.add(code)
+            if issue.get("live_supported") and not issue.get("live_joints"):
+                errors.append(f"{label}[{index}]: live issue has no joints")
+            if issue.get("offline_supported") and not issue.get(
+                "offline_metrics"
+            ):
+                errors.append(f"{label}[{index}]: offline issue has no metrics")
+            if not issue.get("live_supported") and not issue.get(
+                "offline_supported"
+            ):
+                errors.append(f"{label}[{index}]: issue is unsupported everywhere")
+
+    common = load_json(CONTRACTS_DIR / "common.schema.json")
+    contract_codes = set(common["$defs"]["IssueCode"]["enum"])
+    if seen != contract_codes:
+        missing = sorted(seen - contract_codes)
+        extra = sorted(contract_codes - seen)
+        if missing:
+            errors.append(f"common.schema.json: missing issue codes {missing}")
+        if extra:
+            errors.append(f"common.schema.json: stale issue codes {extra}")
+    return errors
+
+
 def validate_openapi() -> list[str]:
     errors: list[str] = []
     try:
@@ -374,6 +447,7 @@ def check_contracts() -> list[str]:
         return errors
     errors.extend(validate_examples(schemas, registry))
     errors.extend(validate_state_machine(schemas, registry))
+    errors.extend(validate_issue_catalogs())
     errors.extend(validate_openapi())
     return errors
 
@@ -389,6 +463,8 @@ def main() -> int:
     print(f"- schemas: {len(list(CONTRACTS_DIR.glob('*.schema.json')))}")
     print(f"- examples: {len(load_json(EXAMPLES_DIR / 'manifest.json')['examples'])}")
     print("- state machine: valid")
+    _, issue_catalogs = load_issue_catalogs()
+    print(f"- issue catalog: {len(issue_catalog_codes(issue_catalogs))} codes")
     print("- openapi: valid")
     return 0
 
