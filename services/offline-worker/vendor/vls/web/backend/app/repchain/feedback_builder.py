@@ -823,7 +823,8 @@ MOTION_FOOT_INDICES = (27, 28, 29, 30, 31, 32)
 MOTION_HAND_INDICES = (15, 16, 17, 18, 19, 20, 21, 22)
 MOTION_ANKLE_INDICES = (27, 28)
 MOTION_BONE_CORRECTION_MAX_M = 0.03
-MOTION_ANCHOR_MAX_STEP_M = 0.02
+MOTION_ANCHOR_DEAD_BAND_M = 0.005
+MOTION_ANCHOR_MAX_JUMP_M = 0.08
 
 
 def _unit_vector(vector: np.ndarray) -> np.ndarray | None:
@@ -1156,9 +1157,11 @@ def _fit_ground_and_anchor(
             else:
                 delta = candidate_anchor - anchor
                 distance = float(np.linalg.norm(delta))
-                if distance > MOTION_ANCHOR_MAX_STEP_M:
-                    anchor = anchor + delta * (MOTION_ANCHOR_MAX_STEP_M / distance)
-                else:
+                if distance > MOTION_ANCHOR_MAX_JUMP_M:
+                    # 单帧跳变过大时按上限跟随，过滤关键点闪跳
+                    anchor = anchor + delta * (MOTION_ANCHOR_MAX_JUMP_M / distance)
+                elif distance >= MOTION_ANCHOR_DEAD_BAND_M:
+                    # 死区内保持锚点，死区外立即跟随，避免真实下蹲被限速拖慢
                     anchor = candidate_anchor
         rotated[frame_index, :, 0] -= anchor[0]
         rotated[frame_index, :, 1] -= anchor[1]
@@ -1171,7 +1174,8 @@ def _fit_ground_and_anchor(
         "support_mode": "hands_and_feet" if exercise == "pushup" else "feet",
         "support_points": len(support_cloud),
         "valid_support_frames": int(sum(frame_valid)),
-        "anchor_max_step_m": MOTION_ANCHOR_MAX_STEP_M,
+        "anchor_dead_band_m": MOTION_ANCHOR_DEAD_BAND_M,
+        "anchor_max_jump_m": MOTION_ANCHOR_MAX_JUMP_M,
     }
 
 
@@ -1396,8 +1400,9 @@ def build_motion_payload(
             **ground_metadata,
         },
         "anchor": {
-            "mode": "support_phase_ground_hold",
-            "max_step_m": MOTION_ANCHOR_MAX_STEP_M,
+            "mode": "support_ground_follow",
+            "dead_band_m": MOTION_ANCHOR_DEAD_BAND_M,
+            "max_jump_m": MOTION_ANCHOR_MAX_JUMP_M,
         },
         "process_metrics": process_metrics,
         "reps": rep_payload,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import numpy as np
 import tempfile
@@ -167,7 +168,7 @@ class ReportTemplateTests(unittest.TestCase):
                 body_points = []
                 world_points = []
                 visibility = []
-                ground_y = 0.6 + frame_id * 0.001
+                ground_y = 0.55 + 0.2 * math.sin(frame_id * 2 * math.pi / 20)
                 for joint_id in range(33):
                     body_points.append([joint_id * 0.001, frame_id * 0.002, -0.1])
                     point_y = ground_y if joint_id in (27, 28, 29, 30, 31, 32) else 0.1
@@ -226,6 +227,11 @@ class ReportTemplateTests(unittest.TestCase):
         foot_indices = [MOTION_JOINT_IDS.index(joint_id) for joint_id in (27, 28, 29, 30, 31, 32)]
         foot_minimum = min(rep_frames[0][2][index * 3 + 1] for index in foot_indices)
         self.assertLess(abs(foot_minimum), 0.01)
+        for frame in payload["frames"]:
+            if not frame[2]:
+                continue
+            frame_foot_minimum = min(frame[2][index * 3 + 1] for index in foot_indices)
+            self.assertLess(abs(frame_foot_minimum), 0.01)
         self.assertEqual(66, len(rep_frames[0][4]))
         self.assertEqual(33, len(rep_frames[0][5]))
         self.assertEqual(len(MOTION_JOINT_IDS), len(rep_frames[0][6]))
