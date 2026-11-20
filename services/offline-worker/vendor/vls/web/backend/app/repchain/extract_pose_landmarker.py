@@ -313,9 +313,9 @@ def process_video(
                 record = {
                     "frame_id": frame_id,
                     "timestamp_ms": timestamp_ms,
-                    "landmarks_normalized": payload["landmarks_normalized"],
-                    "landmarks_world": payload["landmarks_world"],
-                    "visibility": payload["visibility"],
+                    "landmarks_normalized": payload.get("landmarks_normalized"),
+                    "landmarks_world": payload.get("landmarks_world"),
+                    "visibility": payload.get("visibility"),
                     "source": "vision",
                     "detected": payload["detected"],
                 }
