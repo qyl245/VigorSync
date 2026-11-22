@@ -124,8 +124,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\mirror-control.ps1 -Action st
 Android 模拟器运行：
 
 ```powershell
+.\scripts\start_avd.cmd
 cd apps\mobile
 D:\flutter\bin\flutter.bat run -d emulator-5554
+```
+
+启动脚本会自动复用已运行的 AVD，或启动后等待 Android 开机完成。需要同时启动后端、
+安装现有调试包并打开 App 时：
+
+```powershell
+.\scripts\start_avd.ps1 -StartServices -InstallApp
 ```
 
 Core 默认监听 `0.0.0.0:8011`。模拟器填写 `http://10.0.2.2:8011`，实体手机填写

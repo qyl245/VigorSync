@@ -51,6 +51,7 @@ class _AppShellState extends State<AppShell> {
   bool _fallingBackToPairing = false;
   bool _rediscovering = false;
   int _discoveryRounds = 0;
+  bool _socketConnected = false;
   int _index = 0;
   int _refreshToken = 0;
 
@@ -81,7 +82,7 @@ class _AppShellState extends State<AppShell> {
   }
 
   Future<void> _connectEvents() async {
-    if (!mounted || _fallingBackToPairing) return;
+    if (!mounted || _fallingBackToPairing || _socket != null) return;
     try {
       final socket = await _api.connectClientSocket();
       if (!mounted) {
@@ -92,6 +93,7 @@ class _AppShellState extends State<AppShell> {
       _disconnectHandled = false;
       _discoveryRounds = 0;
       _socket = socket;
+      setState(() => _socketConnected = true);
       _queueMirrorThemeSync();
       _socketSubscription = socket.listen(
         (message) {
@@ -112,21 +114,26 @@ class _AppShellState extends State<AppShell> {
             // Ignore malformed events; the socket itself is still healthy.
           }
         },
-        onDone: _handleSocketDisconnect,
-        onError: (_) => _handleSocketDisconnect(),
+        onDone: () => _handleSocketDisconnect(socket),
+        onError: (_) => _handleSocketDisconnect(socket),
       );
     } catch (_) {
+      if (mounted && _socket == null && _socketConnected) {
+        setState(() => _socketConnected = false);
+      }
       _scheduleReconnect();
     }
   }
 
-  void _handleSocketDisconnect() {
+  void _handleSocketDisconnect([WebSocket? source]) {
+    if (source != null && _socket != source) return;
     if (!mounted || _fallingBackToPairing || _disconnectHandled) return;
     _disconnectHandled = true;
     _socketSubscription?.cancel();
     _socketSubscription = null;
     _socket?.close();
     _socket = null;
+    if (mounted) setState(() => _socketConnected = false);
     _scheduleReconnect();
   }
 
@@ -189,6 +196,7 @@ class _AppShellState extends State<AppShell> {
     _disconnectHandled = false;
     _discoveryRounds = 0;
     _fallingBackToPairing = false;
+    _socketConnected = false;
     if (mounted) {
       setState(() => _refreshToken++);
     } else {
@@ -274,17 +282,20 @@ class _AppShellState extends State<AppShell> {
             DashboardPage(
               api: _api,
               refreshToken: _refreshToken,
+              connected: _socketConnected,
               onStartTraining: _startPlannedTraining,
             ),
             HomePage(
               api: _api,
               refreshToken: _refreshToken,
+              connected: _socketConnected,
               onChanged: _refresh,
             ),
             HistoryPage(api: _api, refreshToken: _refreshToken),
             ProfilePage(
               api: _api,
               refreshToken: _refreshToken,
+              connected: _socketConnected,
               isDarkMode: widget.isDarkMode,
               onToggleTheme: widget.onToggleTheme,
               onLogout: widget.onLogout,

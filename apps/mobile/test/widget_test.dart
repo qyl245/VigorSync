@@ -83,8 +83,9 @@ class _ProfileApi extends CoreApiClient {
 
 Future<void> _pumpDashboard(
   WidgetTester tester,
-  List<Map<String, dynamic>> plans,
-) async {
+  List<Map<String, dynamic>> plans, {
+  bool connected = true,
+}) async {
   tester.view.physicalSize = const Size(390, 844);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
@@ -97,6 +98,7 @@ Future<void> _pumpDashboard(
         body: DashboardPage(
           api: _DashboardApi(plans),
           refreshToken: 0,
+          connected: connected,
           onStartTraining: ({
             required exercise,
             required view,
@@ -233,6 +235,28 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('dashboard requires the realtime socket for synced status', (
+    tester,
+  ) async {
+    final weekday = DateTime.now().weekday;
+    await _pumpDashboard(tester, [
+      {
+        'id': 'plan-1',
+        'weekday': weekday,
+        'exercise': 'squat',
+        'view': 'front',
+        'sets': 4,
+        'target_reps': 12,
+        'sort_order': 0,
+      },
+    ], connected: false);
+
+    expect(find.text('未连接'), findsOneWidget);
+    expect(find.text('已同步'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('profile page shows settings overview and layout entry', (
     tester,
   ) async {
@@ -249,6 +273,7 @@ void main() {
           body: ProfilePage(
             api: _ProfileApi(),
             refreshToken: 0,
+            connected: true,
             isDarkMode: true,
             onToggleTheme: () => toggled = true,
             onLogout: () async {},
@@ -297,6 +322,7 @@ void main() {
           body: ProfilePage(
             api: _ProfileApi(offline: true),
             refreshToken: 0,
+            connected: false,
             isDarkMode: true,
             onToggleTheme: () {},
             onLogout: () async {},
@@ -318,6 +344,41 @@ void main() {
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets(
+    'profile remains offline when REST works but realtime socket is down',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildVigorTheme(),
+          home: Scaffold(
+            body: ProfilePage(
+              api: _ProfileApi(),
+              refreshToken: 0,
+              connected: false,
+              isDarkMode: true,
+              onToggleTheme: () {},
+              onLogout: () async {},
+              onReconnect: () async => false,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('当前离线'), findsOneWidget);
+      expect(find.text('已连接'), findsNothing);
+      expect(find.text('实时通道未建立，请重新连接'), findsOneWidget);
+      expect(find.text('无法读取镜端布局'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   test('session parses live summary', () {
     final session = SessionRecord.fromJson({

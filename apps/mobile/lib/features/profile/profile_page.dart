@@ -62,6 +62,7 @@ class ProfilePage extends StatefulWidget {
     super.key,
     required this.api,
     required this.refreshToken,
+    required this.connected,
     required this.isDarkMode,
     required this.onToggleTheme,
     required this.onLogout,
@@ -70,6 +71,7 @@ class ProfilePage extends StatefulWidget {
 
   final CoreApiClient api;
   final int refreshToken;
+  final bool connected;
   final bool isDarkMode;
   final VoidCallback onToggleTheme;
   final Future<void> Function() onLogout;
@@ -251,6 +253,7 @@ class _ProfilePageState extends State<ProfilePage> {
     final leftCount = enabled.where((config) => config.column == 'left').length;
     final rightCount = enabled.length - leftCount;
     final offline = !_loading && _error != null;
+    final online = widget.connected && !offline;
     return SafeArea(
       child: RefreshIndicator(
         onRefresh: _load,
@@ -276,11 +279,13 @@ class _ProfilePageState extends State<ProfilePage> {
                 Text(
                   _loading
                       ? '同步中'
+                      : !widget.connected
+                      ? '未连接'
                       : offline
                       ? '离线'
                       : '已同步',
                   style: TextStyle(
-                    color: offline ? palette.signal : palette.muted,
+                    color: online ? palette.muted : palette.signal,
                     fontSize: 10,
                   ),
                 ),
@@ -299,10 +304,13 @@ class _ProfilePageState extends State<ProfilePage> {
             const SizedBox(height: 18),
             _ConnectionCard(
               loading: _loading,
-              offline: offline,
+              connected: widget.connected,
+              apiUnavailable: offline,
               baseUrl: widget.api.baseUrl,
               reconnecting: _reconnecting,
-              onReconnect: offline ? () => unawaited(_reconnect()) : null,
+              onReconnect: !online && !_loading
+                  ? () => unawaited(_reconnect())
+                  : null,
             ),
             const SizedBox(height: 24),
             const _SectionTitle('镜端显示'),
@@ -310,7 +318,7 @@ class _ProfilePageState extends State<ProfilePage> {
             _MirrorDisplayCard(
               configs: _configs,
               loading: _loading,
-              unavailable: offline,
+              unavailable: !online,
               leftCount: leftCount,
               rightCount: rightCount,
               onEdit: () => unawaited(_openLayoutEditor()),
@@ -339,7 +347,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   ? '正在读取设备信息'
                   : _devices.isEmpty
                   ? '暂无已配对设备'
-                  : '${_devices.length} 台设备 · ${offline ? '当前离线' : '连接正常'}',
+                  : '${_devices.length} 台设备 · ${online ? '实时连接正常' : '当前离线'}',
               onTap: () => unawaited(_showDevices()),
               trailing: Icon(
                 Icons.chevron_right,
@@ -382,14 +390,16 @@ class _ProfilePageState extends State<ProfilePage> {
 class _ConnectionCard extends StatelessWidget {
   const _ConnectionCard({
     required this.loading,
-    required this.offline,
+    required this.connected,
+    required this.apiUnavailable,
     required this.baseUrl,
     required this.reconnecting,
     required this.onReconnect,
   });
 
   final bool loading;
-  final bool offline;
+  final bool connected;
+  final bool apiUnavailable;
   final String baseUrl;
   final bool reconnecting;
   final VoidCallback? onReconnect;
@@ -397,21 +407,23 @@ class _ConnectionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.vigor;
-    final statusColor = loading
+    final statusColor = connected
+        ? palette.accent
+        : loading
         ? palette.cyan
-        : offline
-        ? palette.signal
-        : palette.accent;
+        : palette.signal;
     final status = loading
         ? '正在连接'
-        : offline
-        ? '当前离线'
-        : '已连接';
+        : connected
+        ? '已连接'
+        : '当前离线';
     final subtitle = loading
         ? '正在读取镜端状态'
-        : offline
-        ? '请检查 Core 服务或网络连接'
-        : '镜端实时同步已开启';
+        : connected
+        ? '手机与 Core 的实时通道正常'
+        : apiUnavailable
+        ? '配对可能已失效，或 Core 当前不可达'
+        : '实时通道未建立，请重新连接';
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(

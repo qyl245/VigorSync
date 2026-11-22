@@ -44,9 +44,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\mirror-control.ps1 -Action st
 再启动 Android 模拟器并运行 App：
 
 ```powershell
+.\scripts\start_avd.cmd
 cd apps\mobile
 D:\flutter\bin\flutter.bat run -d emulator-5554
 ```
+
+`start_avd.cmd` 会自动选择唯一 AVD、复用已运行模拟器并等待开机完成。
+也可通过 `start_avd.ps1 -StartServices -InstallApp` 同时启动后端并打开现有调试包。
 
 模拟器内 Core 地址使用 `http://10.0.2.2:8011`，开发配对码默认为
 `482913`。实体手机使用电脑的局域网 IPv4 地址，例如

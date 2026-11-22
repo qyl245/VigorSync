@@ -10,6 +10,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -130,6 +131,36 @@ class FakeOffline:
         return {"status": "ok"}
 
 
+class FakeWeatherResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:
+        return self.payload
+
+
+class FakeWeatherClient:
+    payload: dict[str, Any] = {}
+    error: Exception | None = None
+
+    def __init__(self, *_: Any, **__: Any) -> None:
+        pass
+
+    async def __aenter__(self) -> "FakeWeatherClient":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+    async def get(self, _: str) -> FakeWeatherResponse:
+        if self.error is not None:
+            raise self.error
+        return FakeWeatherResponse(self.payload)
+
+
 class CoreApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -180,6 +211,55 @@ class CoreApiTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code, response.text)
         return response.json()
+
+    def test_weather_uses_configured_location_and_persistent_cache(self) -> None:
+        settings = replace(
+            self.settings,
+            weather_latitude=23.1167,
+            weather_longitude=113.25,
+            weather_location="Guangzhou",
+            weather_ip_geolocation=False,
+        )
+        app = create_app(settings, self.live, self.offline)
+        FakeWeatherClient.error = None
+        FakeWeatherClient.payload = {
+            "current": {
+                "temperature_2m": 20.4,
+                "relative_humidity_2m": 61,
+                "weather_code": 2,
+            },
+            "daily": {
+                "temperature_2m_min": [16.0],
+                "temperature_2m_max": [25.0],
+            },
+        }
+        with patch(
+            "vigorsync_core.app.httpx.AsyncClient",
+            FakeWeatherClient,
+        ):
+            with TestClient(app) as client:
+                response = client.get("/dev/v1/weather")
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual("ok", payload["status"])
+        self.assertEqual("Guangzhou", payload["location"])
+        self.assertEqual("config", payload["location_source"])
+        self.assertEqual(20.4, payload["temperature_c"])
+
+        cached_app = create_app(settings, self.live, self.offline)
+        FakeWeatherClient.error = RuntimeError("provider offline")
+        with patch(
+            "vigorsync_core.app.httpx.AsyncClient",
+            FakeWeatherClient,
+        ):
+            with TestClient(cached_app) as client:
+                cached_response = client.get("/dev/v1/weather")
+        self.assertEqual(200, cached_response.status_code)
+        cached_payload = cached_response.json()
+        self.assertEqual("ok", cached_payload["status"])
+        self.assertTrue(cached_payload["cached"])
+        self.assertTrue(cached_payload["stale"])
+        self.assertEqual("Guangzhou", cached_payload["location"])
 
     def test_session_control_and_idempotency(self) -> None:
         session = self.create_session()

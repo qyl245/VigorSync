@@ -17,6 +17,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_optional_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    return float(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     project_root: Path
@@ -32,8 +39,10 @@ class Settings:
     offline_analysis_enabled: bool = True
     mirror_token: str = "vigorsync-mirror-dev"
     pairing_code: str = "482913"
-    weather_latitude: float = 31.2304
-    weather_longitude: float = 121.4737
+    weather_latitude: float | None = 22.5431
+    weather_longitude: float | None = 114.0579
+    weather_location: str | None = "深圳"
+    weather_ip_geolocation: bool = True
     discovery_enabled: bool = True
     discovery_port: int = 8765
     mirror_name: str = "VigorSync Mirror"
@@ -89,11 +98,20 @@ class Settings:
                 "vigorsync-mirror-dev",
             ),
             pairing_code=os.getenv("VIGORSYNC_PAIRING_CODE", "482913"),
-            weather_latitude=float(
-                os.getenv("VIGORSYNC_WEATHER_LATITUDE", "31.2304")
+            weather_latitude=(
+                _env_optional_float("VIGORSYNC_WEATHER_LATITUDE")
+                or 22.5431
             ),
-            weather_longitude=float(
-                os.getenv("VIGORSYNC_WEATHER_LONGITUDE", "121.4737")
+            weather_longitude=(
+                _env_optional_float("VIGORSYNC_WEATHER_LONGITUDE")
+                or 114.0579
+            ),
+            weather_location=(
+                os.getenv("VIGORSYNC_WEATHER_LOCATION") or "深圳"
+            ),
+            weather_ip_geolocation=_env_bool(
+                "VIGORYSYNC_WEATHER_IP_GEOLOCATION",
+                True,
             ),
             discovery_enabled=os.getenv(
                 "VIGORYSYNC_DISCOVERY_ENABLED",

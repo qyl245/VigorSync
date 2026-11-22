@@ -15,11 +15,13 @@ class HomePage extends StatefulWidget {
     super.key,
     required this.api,
     required this.refreshToken,
+    required this.connected,
     required this.onChanged,
   });
 
   final CoreApiClient api;
   final int refreshToken;
+  final bool connected;
   final VoidCallback onChanged;
 
   @override
@@ -155,7 +157,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                 ),
-                _StatusPill(status: _liveStatus),
+                _StatusPill(status: _liveStatus, connected: widget.connected),
               ],
             ),
             const SizedBox(height: 46),
@@ -246,7 +248,9 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(height: 22),
                   FilledButton(
-                    onPressed: _starting ? null : _startTraining,
+                    onPressed: _starting || !widget.connected
+                        ? null
+                        : _startTraining,
                     child: _starting
                         ? SizedBox(
                             width: 22,
@@ -332,13 +336,14 @@ class _TargetSelector extends StatelessWidget {
 }
 
 class _StatusPill extends StatelessWidget {
-  const _StatusPill({required this.status});
+  const _StatusPill({required this.status, required this.connected});
 
   final String status;
+  final bool connected;
 
   @override
   Widget build(BuildContext context) {
-    final online = status == 'ok';
+    final online = connected && status == 'ok';
     final palette = context.vigor;
     return Container(
       margin: const EdgeInsets.only(left: 8),
@@ -348,7 +353,11 @@ class _StatusPill extends StatelessWidget {
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
-        online ? '已连接' : status,
+        !connected
+            ? '未连接'
+            : online
+            ? '已连接'
+            : status,
         style: TextStyle(
           color: online ? palette.accent : palette.signal,
           fontSize: 10,

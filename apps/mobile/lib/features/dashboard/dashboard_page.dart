@@ -42,11 +42,13 @@ class DashboardPage extends StatefulWidget {
     super.key,
     required this.api,
     required this.refreshToken,
+    required this.connected,
     required this.onStartTraining,
   });
 
   final CoreApiClient api;
   final int refreshToken;
+  final bool connected;
   final StartPlannedTraining onStartTraining;
 
   @override
@@ -262,7 +264,8 @@ class _DashboardPageState extends State<DashboardPage> {
         : '晚上好';
     final dateLine =
         '${now.month}月${now.day}日 · 周${_weekdayLabels[now.weekday - 1]}';
-    final statusColor = _offline ? palette.signal : palette.accent;
+    final unavailable = !widget.connected || _offline;
+    final statusColor = unavailable ? palette.signal : palette.accent;
     return SafeArea(
       child: RefreshIndicator(
         onRefresh: _refresh,
@@ -295,7 +298,11 @@ class _DashboardPageState extends State<DashboardPage> {
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  _offline ? '离线' : '已同步',
+                  !widget.connected
+                      ? '未连接'
+                      : _offline
+                      ? '离线'
+                      : '已同步',
                   style: TextStyle(color: statusColor, fontSize: 11),
                 ),
               ],
@@ -314,7 +321,7 @@ class _DashboardPageState extends State<DashboardPage> {
             _TodayPlanCard(
               plans: _todayPlans,
               selectedIndex: _safePlanIndex,
-              offline: _offline,
+              offline: unavailable,
               onSelectIndex: (index) {
                 setState(() => _currentPlanIndex = index);
               },
@@ -322,11 +329,11 @@ class _DashboardPageState extends State<DashboardPage> {
               onAdjust: () => unawaited(_openWeeklyPlanEditor()),
             ),
             const SizedBox(height: 14),
-            _TrendCard(days: _trend, offline: _offline),
+            _TrendCard(days: _trend, offline: unavailable),
             const SizedBox(height: 14),
             _TodoCard(
               data: _todos,
-              offline: _offline,
+              offline: unavailable,
               controller: _todoController,
               onAdd: _addTodo,
               onToggle: _toggleTodo,

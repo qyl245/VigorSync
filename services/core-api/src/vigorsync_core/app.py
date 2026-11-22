@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import shutil
@@ -300,16 +301,102 @@ def create_app(
         await hub.publish("mirror", message)
         return payload
 
+    def persisted_weather_payload() -> dict[str, Any] | None:
+        raw = database.get_setting("weather.last_payload")
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    async def resolve_weather_location() -> dict[str, Any] | None:
+        if (
+            settings.weather_latitude is not None
+            and settings.weather_longitude is not None
+        ):
+            location_name = settings.weather_location or (
+                f"{settings.weather_latitude:.3f}, "
+                f"{settings.weather_longitude:.3f}"
+            )
+            return {
+                "name": location_name,
+                "latitude": settings.weather_latitude,
+                "longitude": settings.weather_longitude,
+                "source": "config",
+            }
+
+        cached_location = weather_cache.get("location")
+        if cached_location is not None:
+            return cached_location
+
+        raw_location = database.get_setting("weather.location")
+        if raw_location:
+            try:
+                location = json.loads(raw_location)
+                float(location["latitude"])
+                float(location["longitude"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                location = None
+            if isinstance(location, dict):
+                weather_cache["location"] = location
+                return location
+
+        if not settings.weather_ip_geolocation:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                response = await client.get("https://ipinfo.io/json")
+                response.raise_for_status()
+                data = response.json()
+            loc = str(data.get("loc") or "")
+            latitude_text, longitude_text = loc.split(",", 1)
+            latitude = float(latitude_text)
+            longitude = float(longitude_text)
+            city = str(data.get("city") or "").strip()
+            region = str(data.get("region") or "").strip()
+            location_name = " · ".join(
+                value for value in (city, region) if value
+            ) or f"{latitude:.3f}, {longitude:.3f}"
+            location = {
+                "name": location_name,
+                "latitude": latitude,
+                "longitude": longitude,
+                "source": "ip",
+            }
+            weather_cache["location"] = location
+            database.set_setting(
+                "weather.location",
+                json.dumps(location, ensure_ascii=False),
+            )
+            return location
+        except Exception:
+            LOGGER.warning("weather location lookup failed", exc_info=True)
+            return None
+
     async def weather_snapshot() -> dict[str, Any]:
         now = asyncio.get_running_loop().time()
         cached = weather_cache.get("payload")
+        if cached is None:
+            cached = persisted_weather_payload()
         cached_at = float(weather_cache.get("fetched_monotonic") or 0.0)
         if cached is not None and now - cached_at < WEATHER_TTL_S:
-            return {**cached, "cached": True}
+            return {**cached, "cached": True, "stale": False}
+        location = await resolve_weather_location()
+        if location is None:
+            if cached is not None:
+                return {**cached, "cached": True, "stale": True}
+            return {
+                "status": "unavailable",
+                "reason": "location_unavailable",
+                "fetched_at": utc_now(),
+                "cached": False,
+            }
         url = (
             "https://api.open-meteo.com/v1/forecast"
-            f"?latitude={settings.weather_latitude}"
-            f"&longitude={settings.weather_longitude}"
+            f"?latitude={location['latitude']}"
+            f"&longitude={location['longitude']}"
             "&current=temperature_2m,relative_humidity_2m,weather_code"
             "&daily=temperature_2m_max,temperature_2m_min"
             "&forecast_days=1&timezone=auto"
@@ -330,17 +417,24 @@ def create_app(
                 "weather_text": WEATHER_CODE_TEXT.get(code, "未知"),
                 "temp_min_c": (daily.get("temperature_2m_min") or [None])[0],
                 "temp_max_c": (daily.get("temperature_2m_max") or [None])[0],
+                "location": location["name"],
+                "location_source": location["source"],
                 "fetched_at": utc_now(),
                 "cached": False,
             }
             weather_cache["payload"] = payload
             weather_cache["fetched_monotonic"] = now
+            database.set_setting(
+                "weather.last_payload",
+                json.dumps(payload, ensure_ascii=False),
+            )
             return payload
         except Exception:
             if cached is not None:
-                return {**cached, "cached": True}
+                return {**cached, "cached": True, "stale": True}
             return {
                 "status": "unavailable",
+                "reason": "weather_provider_unavailable",
                 "fetched_at": utc_now(),
                 "cached": False,
             }
