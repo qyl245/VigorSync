@@ -2071,7 +2071,7 @@ def build_process_metric_cards(motion: dict[str, Any] | None) -> str:
     metrics = process_metrics.get("metrics") or {}
     if not metrics:
         return (
-            '<div class="process-empty">3D 轨迹可用后，将在这里显示重心、躯干与左右对称性曲线。</div>'
+            '<div class="process-empty">3D 轨迹可用后，将在这里显示重心、动作偏移、稳定性和左右对称性曲线。</div>'
         )
     status_class = {
         "normal": "normal",
@@ -2080,13 +2080,22 @@ def build_process_metric_cards(motion: dict[str, Any] | None) -> str:
         "unavailable": "unavailable",
     }
     cards = []
-    for index, metric_id in enumerate(("com_ap_drift", "torso_variability", "symmetry_index"), 1):
+    metric_order = process_metrics.get("metric_order") or list(metrics)
+    for index, metric_id in enumerate(metric_order, 1):
         metric = metrics.get(metric_id) or {}
         status = str(metric.get("status") or "unavailable")
         status_label = str(metric.get("status_label") or "数据不足")
         chart = metric.get("chart") or {}
         series = chart.get("series") or {}
-        has_series = bool(series.get("t"))
+        has_series = bool(
+            series.get("t")
+            or chart.get("curves")
+            or chart.get("bars")
+        )
+        chart_note = str(
+            chart.get("note") or "点击曲线可跳转视频"
+        )
+        wide_class = " is-wide" if metric.get("wide") else ""
         live_unit = str(metric.get("unit") or "")
         live_chart_unit = str(chart.get("y_label") or "")
         details = []
@@ -2100,7 +2109,7 @@ def build_process_metric_cards(motion: dict[str, Any] | None) -> str:
             details.append(f"<p class=\"process-view-note\">{html.escape(str(metric['view_note']))}</p>")
         cards.append(
             f"""
-            <article class="process-metric {status_class.get(status, 'unavailable')}"
+            <article class="process-metric {status_class.get(status, 'unavailable')}{wide_class}"
               data-process-metric="{html.escape(metric_id)}"
               data-live-unit="{html.escape(live_unit)}">
               <header class="process-metric-head">
@@ -2118,7 +2127,7 @@ def build_process_metric_cards(motion: dict[str, Any] | None) -> str:
               </div>
               <div class="process-live">
                 <span>当前 <b data-live-value>--</b> <em data-live-extra></em></span>
-                <span title="{html.escape(live_chart_unit)}">点击曲线可跳转视频</span>
+                <span title="{html.escape(live_chart_unit)}">{html.escape(chart_note)}</span>
               </div>
               <details class="process-basis">
                 <summary>定义与阈值依据</summary>
@@ -2191,6 +2200,98 @@ PROCESS_METRICS_SCRIPT = r"""
     return { min: 0, max: Math.max(observed * 1.15, alarm * 1.28, warn * 1.5, 1) };
   }
 
+  function drawPhaseCurves(entry) {
+    const chart = entry.metric.chart;
+    const curves = Array.isArray(chart.curves) ? chart.curves : [];
+    const ctx = entry.canvas.getContext('2d');
+    ctx.clearRect(0, 0, entry.width, entry.height);
+    if (!curves.length) {
+      setEmpty(entry, '暂无可绘制数据');
+      return;
+    }
+    entry.empty.hidden = true;
+    const values = curves.flatMap((item) =>
+      (item.curve || []).map(Number).filter(Number.isFinite),
+    );
+    if (!values.length) {
+      setEmpty(entry, '暂无可绘制数据');
+      return;
+    }
+    const plot = { left: 46, right: 14, top: 19, bottom: 27 };
+    const plotWidth = Math.max(1, entry.width - plot.left - plot.right);
+    const plotHeight = Math.max(1, entry.height - plot.top - plot.bottom);
+    const rawMin = Math.min(...values);
+    const rawMax = Math.max(...values);
+    const padding = Math.max(2, (rawMax - rawMin) * 0.08);
+    const min = rawMin - padding;
+    const max = rawMax + padding;
+    const x = (progress) => plot.left + clamp(progress, 0, 100) / 100 * plotWidth;
+    const y = (value) => plot.top + (max - value) / Math.max(1e-6, max - min) * plotHeight;
+    ctx.fillStyle = 'rgba(241,240,231,.018)';
+    ctx.fillRect(plot.left, plot.top, plotWidth, plotHeight);
+    ctx.font = '9px ui-monospace,Consolas,monospace';
+    for (let step = 0; step <= 4; step += 1) {
+      const value = max - (max - min) * step / 4;
+      const py = y(value);
+      ctx.strokeStyle = 'rgba(241,240,231,.11)';
+      ctx.beginPath();
+      ctx.moveTo(plot.left, py);
+      ctx.lineTo(plot.left + plotWidth, py);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(158,163,154,.86)';
+      ctx.fillText(value.toFixed(0), 4, py + 3);
+    }
+    for (let progress = 0; progress <= 100; progress += 25) {
+      const px = x(progress);
+      ctx.strokeStyle = 'rgba(241,240,231,.07)';
+      ctx.beginPath();
+      ctx.moveTo(px, plot.top);
+      ctx.lineTo(px, plot.top + plotHeight);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(158,163,154,.86)';
+      const label = `${progress}%`;
+      const width = ctx.measureText(label).width;
+      ctx.fillText(
+        label,
+        px - (progress === 0 ? 0 : progress === 100 ? width : width / 2),
+        plot.top + plotHeight + 14,
+      );
+    }
+    curves.forEach((curve, index) => {
+      const points = (curve.curve || []).map(Number);
+      if (!points.length) return;
+      const color = `hsl(${190 + (index * 29) % 120}, 78%, 66%)`;
+      ctx.save();
+      ctx.beginPath();
+      points.forEach((value, pointIndex) => {
+        if (!Number.isFinite(value)) return;
+        const px = x(pointIndex / Math.max(1, points.length - 1) * 100);
+        const py = y(value);
+        if (pointIndex === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.7;
+      ctx.globalAlpha = 0.86;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = color;
+      ctx.font = '9px ui-monospace,Consolas,monospace';
+      ctx.fillText(`R${curve.rep_id}`, plot.left + 5, plot.top + 11 + index * 11);
+      const bottom = Number(curve.bottom_progress_pct);
+      if (Number.isFinite(bottom)) {
+        const bottomIndex = Math.round(bottom / 100 * (points.length - 1));
+        const value = points[bottomIndex];
+        if (Number.isFinite(value)) {
+          ctx.beginPath();
+          ctx.arc(x(bottom), y(value), 2.6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    });
+  }
+
   function draw(entry, currentTime) {
     const chart = entry.metric.chart;
     const series = chart.series || {};
@@ -2198,6 +2299,10 @@ PROCESS_METRICS_SCRIPT = r"""
     const values = (series.v || []).map(Number);
     const ctx = entry.canvas.getContext('2d');
     ctx.clearRect(0, 0, entry.width, entry.height);
+    if (chart.kind === 'phase_curves') {
+      drawPhaseCurves(entry);
+      return;
+    }
     if (!times.length || !values.length) {
       setEmpty(entry, '暂无可绘制数据');
       return;
@@ -2209,8 +2314,8 @@ PROCESS_METRICS_SCRIPT = r"""
     const x = (time) => plot.left + clamp(time / duration, 0, 1) * plotWidth;
     const limits = domain(entry);
     const y = (value) => plot.top + (limits.max - value) / (limits.max - limits.min) * plotHeight;
-    const warn = Number(chart.warn);
-    const alarm = Number(chart.alarm);
+    const warn = chart.warn == null ? NaN : Number(chart.warn);
+    const alarm = chart.alarm == null ? NaN : Number(chart.alarm);
     const positiveWarn = Number.isFinite(warn) ? y(warn) : null;
     const positiveAlarm = Number.isFinite(alarm) ? y(alarm) : null;
 
@@ -2285,29 +2390,56 @@ PROCESS_METRICS_SCRIPT = r"""
     const color = entry.metric.status === 'abnormal'
       ? '#ff644d'
       : entry.metric.status === 'attention' ? '#f0c56b' : '#86e8ff';
-    ctx.save();
-    ctx.beginPath();
-    let started = false;
-    for (let index = 0; index < times.length; index += 1) {
-      if (!Number.isFinite(values[index])) {
-        started = false;
-        continue;
+    if (chart.kind === 'rep_bars') {
+      const bars = Array.isArray(chart.bars) ? chart.bars : [];
+      const baseY = y(0);
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 6;
+      ctx.font = '9px ui-monospace,Consolas,monospace';
+      for (const bar of bars) {
+        const value = Number(bar.value);
+        if (!Number.isFinite(value)) continue;
+        const left = x(Number(bar.start_s));
+        const right = x(Number(bar.end_s));
+        const width = Math.max(3, right - left - 3);
+        const top = y(value);
+        ctx.fillRect(left + 1.5, top, width, Math.max(1, baseY - top));
+        ctx.fillStyle = 'rgba(241,240,231,.8)';
+        ctx.fillText(
+          `${value.toFixed(1)}s`,
+          left + 2,
+          Math.max(plot.top + 9, top - 4),
+        );
+        ctx.fillStyle = color;
       }
-      const px = x(times[index]);
-      const py = y(values[index]);
-      if (!started) {
-        ctx.moveTo(px, py);
-        started = true;
-      } else {
-        ctx.lineTo(px, py);
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.beginPath();
+      let started = false;
+      for (let index = 0; index < times.length; index += 1) {
+        if (!Number.isFinite(values[index])) {
+          started = false;
+          continue;
+        }
+        const px = x(times[index]);
+        const py = y(values[index]);
+        if (!started) {
+          ctx.moveTo(px, py);
+          started = true;
+        } else {
+          ctx.lineTo(px, py);
+        }
       }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2.2;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 7;
+      ctx.stroke();
+      ctx.restore();
     }
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2.2;
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 7;
-    ctx.stroke();
-    ctx.restore();
 
     const cursorX = x(currentTime);
     ctx.strokeStyle = 'rgba(241,240,231,.7)';
@@ -2351,18 +2483,23 @@ PROCESS_METRICS_SCRIPT = r"""
 
   for (const entry of entries) {
     resize(entry);
-    entry.canvas.addEventListener('click', (event) => {
-      const rect = entry.canvas.getBoundingClientRect();
-      const plotLeft = 43;
-      const plotRight = 12;
-      const ratio = clamp((event.clientX - rect.left - plotLeft) / Math.max(1, rect.width - plotLeft - plotRight), 0, 1);
-      const target = ratio * duration;
-      if (typeof seekTo === 'function') {
-        seekTo(target, `查看过程指标 · ${target.toFixed(2)}s`);
-      } else if (media) {
-        media.currentTime = target;
-      }
-    });
+    if (entry.metric.chart.clickable !== false) {
+      entry.canvas.addEventListener('click', (event) => {
+        const rect = entry.canvas.getBoundingClientRect();
+        const plotLeft = 43;
+        const plotRight = 12;
+        const ratio = clamp((event.clientX - rect.left - plotLeft) / Math.max(1, rect.width - plotLeft - plotRight), 0, 1);
+        const target = ratio * duration;
+        if (typeof seekTo === 'function') {
+          seekTo(target, `查看过程指标 · ${target.toFixed(2)}s`);
+        } else if (media) {
+          media.currentTime = target;
+        }
+      });
+      entry.canvas.style.cursor = 'crosshair';
+    } else {
+      entry.canvas.style.cursor = 'default';
+    }
     if (window.ResizeObserver) {
       const observer = new ResizeObserver(() => { resize(entry); drawAll(); });
       observer.observe(entry.wrap);
@@ -2906,9 +3043,9 @@ background-size:54px 54px,54px 54px,auto,auto,auto;color:var(--ink);font-family:
 .motion-controls{{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px}}.motion-mode{{color:var(--muted);font-size:10px}}.motion-controls button{{padding:7px 10px;font-size:10px}}.motion-prediction{{margin-top:8px;padding:6px 8px;border-left:2px solid var(--amber);background:rgba(240,197,107,.07);color:var(--amber);font-size:10px;line-height:1.45}}.motion-prediction[hidden]{{display:none}}.motion-note{{margin:9px 0 0;color:var(--muted);font-size:9px}}
 .process-card{{margin-top:18px;padding:20px 22px;border:1px solid var(--line);background:linear-gradient(145deg,rgba(255,255,255,.035),transparent 46%),var(--surface)}}
 .process-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:6px}}.process-head h2{{margin:0;font-size:26px}}.process-policy{{padding:5px 9px;border:1px solid rgba(240,197,107,.36);border-radius:999px;color:var(--amber);font-size:9px;white-space:nowrap}}
-.process-intro{{margin:0 0 14px;max-width:900px;color:var(--muted);font-size:11px;line-height:1.65}}.process-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}
+.process-intro{{margin:0 0 14px;max-width:900px;color:var(--muted);font-size:11px;line-height:1.65}}.process-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}
 .trajectory-metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin:14px 0;border:1px solid var(--line);background:var(--line)}}.trajectory-axis-label{{margin:14px 0 6px;color:var(--muted);font:9px/1.3 ui-monospace,Consolas,monospace;letter-spacing:.08em}}.trajectory-axis-label.is-right{{margin:6px 0 0;text-align:right}}.trajectory-stage{{position:relative;height:340px;border:1px solid rgba(241,240,231,.08);background:#080b09}}.trajectory-stage canvas{{display:block;width:100%;height:100%;touch-action:none;cursor:crosshair}}.trajectory-tip{{position:absolute;top:8px;left:8px;z-index:2;min-width:132px;padding:7px 9px;border:1px solid var(--line);background:rgba(5,7,6,.94);color:#d8dccf;font:10px/1.65 ui-monospace,Consolas,monospace;pointer-events:none;white-space:nowrap}}.trajectory-tip[hidden]{{display:none}}.trajectory-tip b{{color:var(--ink);font-weight:700}}.trajectory-tip .t-row{{display:flex;align-items:center;gap:5px}}.trajectory-tip .t-dot{{width:6px;height:6px;border-radius:50%;flex:0 0 auto}}.trajectory-legend{{display:flex;flex-wrap:wrap;gap:6px;margin:9px 0 0}}.trajectory-key{{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.02);color:#c8ccc3;font:500 10px/1.2 "Microsoft YaHei",system-ui,sans-serif;cursor:pointer}}.trajectory-key.is-template{{cursor:default;color:var(--muted)}}.trajectory-key .swatch{{width:14px;border-top:2px solid var(--key,#86e8ff)}}.trajectory-key.is-template .swatch{{border-top:2px dashed var(--acid)}}.trajectory-key.is-off{{opacity:.42}}.trajectory-key .band{{width:5px;height:5px;border-radius:50%;background:var(--amber)}}.trajectory-download{{color:var(--cyan);text-decoration:none}}.trajectory-download:hover{{text-decoration:underline}}
-.process-metric{{min-width:0;padding:15px;border:1px solid var(--line);border-top:2px solid var(--cyan);background:var(--panel)}}.process-metric.attention{{border-top-color:var(--amber)}}.process-metric.abnormal{{border-top-color:var(--signal)}}.process-metric.unavailable{{border-top-color:var(--muted)}}
+.process-metric{{min-width:0;padding:15px;border:1px solid var(--line);border-top:2px solid var(--cyan);background:var(--panel)}}.process-metric.is-wide,.process-metric:last-child:nth-child(odd){{grid-column:1/-1}}.process-metric.attention{{border-top-color:var(--amber)}}.process-metric.abnormal{{border-top-color:var(--signal)}}.process-metric.unavailable{{border-top-color:var(--muted)}}
 .process-metric-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}}.process-metric-head>div{{display:flex;align-items:baseline;gap:7px;min-width:0}}.process-index{{color:var(--muted);font:9px/1 ui-monospace,Consolas,monospace}}.process-metric h3{{margin:0;font-size:16px;line-height:1.25}}
 .process-status{{padding:4px 7px;border-radius:999px;font-size:9px;font-weight:800;white-space:nowrap}}.process-status.normal{{background:rgba(134,232,255,.12);color:var(--cyan)}}.process-status.attention{{background:rgba(240,197,107,.12);color:var(--amber)}}.process-status.abnormal{{background:rgba(255,100,77,.14);color:var(--signal)}}.process-status.unavailable{{background:rgba(158,163,154,.1);color:var(--muted)}}
 .process-reading{{display:flex;align-items:baseline;gap:5px;margin-top:14px}}.process-reading strong{{font-size:31px;line-height:1;color:var(--ink)}}.process-reading span{{color:var(--muted);font-size:10px}}.process-headline{{margin:10px 0 0;color:#d8dccf;font-size:11px;font-weight:700;line-height:1.45}}.process-detail{{min-height:32px;margin:5px 0 0;color:var(--muted);font-size:9px;line-height:1.5}}
@@ -2956,9 +3093,9 @@ button{{flex:0 0 auto;padding:9px 13px;border:1px solid rgba(134,232,255,.4);bor
 </section>
 <section class="process-card" aria-labelledby="process-title">
 <div class="process-head"><div><p class="eyebrow">PROCESS METRICS</p><h2 id="process-title">过程指标</h2></div><span class="process-policy">工程阈值 · 非临床</span></div>
-<p class="process-intro">基于已有 2D 关键点重建的 3D 轨迹，观察同一个 Rep 内的重心、躯干和左右差异。曲线与视频播放、Rep 时间轴同步，点击任一曲线可跳转到对应时刻。</p>
+<p class="process-intro">基于已有 2D 关键点重建的 3D 轨迹，分别观察重心、姿态偏移、动作稳定性和左右差异。机位不支持可靠评估的指标只显示趋势，不参与异常分级。</p>
 <div class="process-grid">{process_cards}</div>
-<p class="process-footnote">曲线按约 12 Hz 抽样；遮挡段沿用骨架预测并降低置信度。阈值用于产品内复盘与趋势比较，并非临床诊断标准。</p>
+<p class="process-footnote">曲线按约 12 Hz 抽样；遮挡段沿用骨架预测并降低置信度。矢状面指标以侧视/斜侧机位为准，左右对称以正面/背面机位为准。阈值用于产品内复盘与趋势比较，并非临床诊断标准。</p>
 </section>
 {trajectory_html}
 <section class="snapshot"><div><p class="eyebrow">SESSION SNAPSHOT</p><h1>{exercise_label}<em>离线复盘</em></h1><span class="status">{quality_label}</span></div>

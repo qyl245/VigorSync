@@ -14,6 +14,7 @@ sys.path.insert(0, str(SRC))
 
 from vigorsync_offline import app as adapter  # noqa: F401 - initializes vendor path
 from motion_metrics import build_process_metrics
+from motion_metrics import _build_tempo_metric
 from app.repchain.feedback_builder import (
     MOTION_JOINT_IDS,
     _predict_side_view_far_limbs,
@@ -270,17 +271,64 @@ class ReportTemplateTests(unittest.TestCase):
         )
         self.assertEqual("vls-process-metrics-v1", process_metrics["schema_version"])
         self.assertEqual(
-            {"com_ap_drift", "torso_variability", "symmetry_index"},
+            {
+                "com_ap_drift",
+                "depth_angle",
+                "tracking_angle",
+                "torso_offset",
+                "torso_stability",
+                "symmetry_index",
+                "tempo_structure",
+                "motion_profile",
+                "left_right_sync",
+            },
             set(process_metrics["metrics"]),
         )
         com = process_metrics["metrics"]["com_ap_drift"]
-        self.assertGreater(com["chart"]["warn"], 0)
-        self.assertGreater(com["chart"]["alarm"], com["chart"]["warn"])
         self.assertTrue(com["chart"]["series"]["t"])
         self.assertEqual(2, len(com["reps"]))
-        self.assertIn(com["status"], {"normal", "attention", "abnormal"})
-        self.assertTrue(process_metrics["metrics"]["torso_variability"]["chart"]["series"]["t"])
-        self.assertTrue(process_metrics["metrics"]["symmetry_index"]["chart"]["series"]["v"])
+        self.assertEqual("trend_only", com["availability"])
+        self.assertEqual("仅趋势", com["status_label"])
+        self.assertIsNone(com["chart"]["warn"])
+        torso_offset = process_metrics["metrics"]["torso_offset"]
+        torso_stability = process_metrics["metrics"]["torso_stability"]
+        self.assertEqual("trend_only", torso_offset["availability"])
+        self.assertEqual("trend_only", torso_stability["availability"])
+        self.assertTrue(torso_offset["chart"]["series"]["t"])
+        self.assertTrue(torso_stability["chart"]["series"]["v"])
+        self.assertEqual(
+            "trend_only",
+            process_metrics["metrics"]["depth_angle"]["availability"],
+        )
+        self.assertEqual(
+            "底部膝角",
+            process_metrics["metrics"]["depth_angle"]["title"],
+        )
+        tracking = process_metrics["metrics"]["tracking_angle"]
+        self.assertEqual("diagnostic", tracking["availability"])
+        self.assertEqual("膝部内扣轨迹", tracking["title"])
+        self.assertTrue(tracking["status_label"].startswith("专项"))
+        symmetry = process_metrics["metrics"]["symmetry_index"]
+        self.assertEqual("reliable", symmetry["availability"])
+        self.assertTrue(symmetry["chart"]["series"]["v"])
+        tempo = process_metrics["metrics"]["tempo_structure"]
+        self.assertEqual("rep_bars", tempo["chart"]["kind"])
+        self.assertEqual("insufficient", tempo["availability"])
+        self.assertEqual(2, len(tempo["chart"]["bars"]))
+        profile = process_metrics["metrics"]["motion_profile"]
+        self.assertEqual("phase_curves", profile["chart"]["kind"])
+        self.assertEqual("diagnostic", profile["availability"])
+        self.assertTrue(profile["chart"]["curves"])
+        self.assertEqual("/100", profile["unit"])
+        self.assertTrue(
+            all(
+                "smoothness_index" in curve
+                for curve in profile["chart"]["curves"]
+            )
+        )
+        sync = process_metrics["metrics"]["left_right_sync"]
+        self.assertEqual("rep_bars", sync["chart"]["kind"])
+        self.assertEqual("diagnostic", sync["availability"])
         pushup_metrics = build_process_metrics(
             points,
             visibility,
@@ -293,7 +341,35 @@ class ReportTemplateTests(unittest.TestCase):
             view="side_right",
         )
         self.assertEqual("pushup", pushup_metrics["exercise"])
-        self.assertEqual(3, len(pushup_metrics["metrics"]))
+        self.assertEqual(9, len(pushup_metrics["metrics"]))
+        self.assertEqual(
+            "底部肘角",
+            pushup_metrics["metrics"]["depth_angle"]["title"],
+        )
+        self.assertEqual(
+            "手肘外张角度",
+            pushup_metrics["metrics"]["tracking_angle"]["title"],
+        )
+        self.assertEqual(
+            "diagnostic",
+            pushup_metrics["metrics"]["depth_angle"]["availability"],
+        )
+        self.assertEqual(
+            "trend_only",
+            pushup_metrics["metrics"]["tracking_angle"]["availability"],
+        )
+        self.assertEqual(
+            "reliable",
+            pushup_metrics["metrics"]["torso_offset"]["availability"],
+        )
+        self.assertEqual(
+            "trend_only",
+            pushup_metrics["metrics"]["symmetry_index"]["availability"],
+        )
+        self.assertEqual(
+            "trend_only",
+            pushup_metrics["metrics"]["left_right_sync"]["availability"],
+        )
 
         feedback = {
             "clip_id": "job_process",
@@ -311,14 +387,72 @@ class ReportTemplateTests(unittest.TestCase):
             motion={"duration_s": 2.0, "process_metrics": process_metrics},
         )
         self.assertIn('data-process-metric="com_ap_drift"', html)
-        self.assertIn('data-process-metric="torso_variability"', html)
+        self.assertIn('data-process-metric="depth_angle"', html)
+        self.assertIn('data-process-metric="tracking_angle"', html)
+        self.assertIn('data-process-metric="torso_offset"', html)
+        self.assertIn('data-process-metric="torso_stability"', html)
         self.assertIn('data-process-metric="symmetry_index"', html)
+        self.assertIn('data-process-metric="tempo_structure"', html)
+        self.assertIn('data-process-metric="motion_profile"', html)
+        self.assertIn('data-process-metric="left_right_sync"', html)
         self.assertIn("重心前后漂移", html)
-        self.assertIn("躯干角波动", html)
+        self.assertIn("底部膝角", html)
+        self.assertIn("膝部内扣轨迹", html)
+        self.assertIn("底部躯干前倾", html)
+        self.assertIn("前倾稳定性", html)
         self.assertIn("左右对称性指数", html)
+        self.assertIn("分阶段节奏", html)
+        self.assertIn("Rep 动作轮廓", html)
+        self.assertIn("左右动作同步性", html)
         self.assertIn("4% 起进入关注、7% 判为异常", html)
         self.assertIn("vls-process-metrics-v1", html)
         self.assertIn("点击曲线可跳转视频", html)
+
+    def test_torso_offset_and_stability_are_separate(self) -> None:
+        frame_count = 61
+        points = np.zeros((frame_count, 33, 3), dtype=np.float64)
+        visibility = np.ones((frame_count, 33), dtype=np.float64)
+        predicted = np.zeros((frame_count, 33), dtype=bool)
+        for index in range(frame_count):
+            points[index, 11] = (-0.2, 1.5, 0.4)
+            points[index, 12] = (0.2, 1.5, 0.4)
+            points[index, 23] = (-0.15, 1.0, 0.0)
+            points[index, 24] = (0.15, 1.0, 0.0)
+            points[index, 27] = (-0.15, 0.1, 0.0)
+            points[index, 28] = (0.15, 0.1, 0.0)
+            points[index, 31] = (-0.15, 0.05, 0.1)
+            points[index, 32] = (0.15, 0.05, 0.1)
+        times = np.arange(frame_count, dtype=np.float64) / 30.0
+        process_metrics = build_process_metrics(
+            points,
+            visibility,
+            predicted,
+            times,
+            [1] * frame_count,
+            [{"rep_id": 1, "start_s": 0.0, "bottom_s": 1.0, "end_s": 2.0}],
+            fps=30.0,
+            exercise="squat",
+            view="side_left",
+        )
+        self.assertEqual(
+            "attention",
+            process_metrics["metrics"]["torso_offset"]["status"],
+        )
+        self.assertEqual(
+            "normal",
+            process_metrics["metrics"]["torso_stability"]["status"],
+        )
+
+    def test_tempo_cv_matches_rep_duration_contract(self) -> None:
+        reps = [
+            {"rep_id": 1, "start_s": 0.0, "bottom_s": 2.0, "end_s": 5.0},
+            {"rep_id": 2, "start_s": 5.0, "bottom_s": 6.0, "end_s": 7.0},
+            {"rep_id": 3, "start_s": 7.0, "bottom_s": 8.0, "end_s": 9.0},
+            {"rep_id": 4, "start_s": 9.0, "bottom_s": 10.0, "end_s": 11.0},
+        ]
+        metric = _build_tempo_metric(reps, "squat")
+        expected = round(float(np.std([5.0, 2.0, 2.0, 2.0])) / 2.75 * 100)
+        self.assertEqual(str(expected), metric["value_text"])
 
     def test_occlusion_gap_is_predicted_and_long_gap_is_hidden(self) -> None:
         frame_count = 31
