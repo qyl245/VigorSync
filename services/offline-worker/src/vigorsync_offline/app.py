@@ -17,7 +17,12 @@ from pydantic import BaseModel, Field
 
 SERVICE_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = SERVICE_ROOT.parents[1]
-VLS_ROOT = SERVICE_ROOT / "vendor" / "vls"
+RESOURCE_ROOT = Path(
+    os.getenv("VIGORYSYNC_RESOURCE_ROOT", str(PROJECT_ROOT))
+).resolve()
+VLS_ROOT = Path(
+    os.getenv("VIGORYSYNC_VLS_ROOT", str(SERVICE_ROOT / "vendor" / "vls"))
+).resolve()
 VLS_BACKEND = VLS_ROOT / "web" / "backend"
 VLS_REPCHAIN = VLS_BACKEND / "app" / "repchain"
 
@@ -206,7 +211,7 @@ async def attach_realtime_review(request: Request, call_next):
         try:
             enrich_job_realtime_review(
                 vls_config.JOBS_DIR / match.group(1),
-                PROJECT_ROOT,
+                RESOURCE_ROOT,
             )
         except Exception:
             logger.exception(

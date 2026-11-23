@@ -2,9 +2,10 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "python-env.ps1")
 $python = Resolve-VigorSyncPython -ProjectRoot $projectRoot
+$pythonBase = (& $python -c "import sys; print(sys.base_prefix)").Trim()
 $launcher = Join-Path $projectRoot "apps\desktop\launcher.py"
 $dist = Join-Path $projectRoot "dist\VigorSyncLauncher"
-$condaBin = "D:\Anaconda\Library\bin"
+$condaBin = Join-Path $pythonBase "Library\bin"
 $runtimeDlls = @(
     "ffi-8.dll",
     "liblzma.dll",

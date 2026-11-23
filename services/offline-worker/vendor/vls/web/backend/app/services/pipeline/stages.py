@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -62,7 +63,10 @@ def _run_script(job_dir: Path, args: list[str], log_name: str, timeout_s: int) -
     """子进程调用现有脚本：参数数组、固定 cwd、日志落盘。"""
     log_path = job_dir / "logs" / f"{log_name}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [config.PYTHON_EXE, *args]
+    cmd = [config.PYTHON_EXE]
+    if os.environ.get("VLS_PYTHON_SCRIPT_FLAG") == "1":
+        cmd.append("--run-python-script")
+    cmd.extend(args)
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n$ {' '.join(cmd)}\n")
         log.flush()
@@ -100,8 +104,10 @@ def _build_trajectory_overlay(
         return "no_template"
     log_path = job_dir / "logs" / "trajectory.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        config.PYTHON_EXE,
+    cmd = [config.PYTHON_EXE]
+    if os.environ.get("VLS_PYTHON_SCRIPT_FLAG") == "1":
+        cmd.append("--run-python-script")
+    cmd.extend([
         str(script),
         "--template",
         str(template),
@@ -109,7 +115,7 @@ def _build_trajectory_overlay(
         str(work_dir / clip_id),
         "--output-dir",
         str(artifacts_root / "trajectory" / clip_id),
-    ]
+    ])
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n$ {' '.join(cmd)}\n")
         log.flush()

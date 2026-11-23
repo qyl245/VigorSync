@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -12,7 +13,12 @@ from typing import Mapping
 from jsonschema import Draft202012Validator
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
+PROJECT_ROOT = Path(
+    os.getenv(
+        "VIGORSYNC_RESOURCE_ROOT",
+        str(Path(__file__).resolve().parents[4]),
+    )
+).resolve()
 ISSUES_ROOT = PROJECT_ROOT / "configs" / "issues"
 SCHEMA_PATH = ISSUES_ROOT / "schema.json"
 CATALOG_VERSION = "vigorsync-issue-catalog-v1"

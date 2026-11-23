@@ -7,6 +7,7 @@ import ctypes
 import json
 import logging
 import os
+import runpy
 import sys
 import threading
 import time
@@ -36,6 +37,13 @@ OFFLINE_DATA_ROOT = DATA_ROOT / "webdata" / "offline"
 LIVE_SOURCE = SOURCE_ROOT / "services" / "live-engine" / "src"
 CORE_SOURCE = SOURCE_ROOT / "services" / "core-api" / "src"
 OFFLINE_SOURCE = SOURCE_ROOT / "services" / "offline-worker" / "src"
+VENDOR_VLS_ROOT = (
+    SOURCE_ROOT
+    / "services"
+    / "offline-worker"
+    / "vendor"
+    / "vls"
+)
 APP_TITLE = "VigorSync · 动作遥测"
 LIVE_URL = "http://127.0.0.1:8020"
 MIRROR_URL = "http://127.0.0.1:8080"
@@ -44,6 +52,8 @@ OFFLINE_URL = "http://127.0.0.1:8030"
 CORE_HOST = os.getenv("VIGORSYNC_CORE_HOST", "0.0.0.0")
 
 os.environ.setdefault("VIGORSYNC_PROJECT_ROOT", str(DATA_ROOT))
+os.environ.setdefault("VIGORSYNC_RESOURCE_ROOT", str(SOURCE_ROOT))
+os.environ.setdefault("VIGORYSYNC_VLS_ROOT", str(VENDOR_VLS_ROOT))
 os.environ.setdefault("VIGORSYNC_SESSION_ROOT", str(SESSION_ROOT))
 os.environ.setdefault("VIGORSYNC_LIVE_HOST", "127.0.0.1")
 os.environ.setdefault("VIGORSYNC_LIVE_PORT", "8020")
@@ -55,6 +65,8 @@ os.environ.setdefault(
 )
 os.environ.setdefault("VIGORYSYNC_OFFLINE_DATA_ROOT", str(OFFLINE_DATA_ROOT))
 os.environ.setdefault("VLS_WEBDATA_ROOT", str(OFFLINE_DATA_ROOT))
+if IS_FROZEN:
+    os.environ.setdefault("VLS_PYTHON_SCRIPT_FLAG", "1")
 if str(LIVE_SOURCE) not in sys.path:
     sys.path.insert(0, str(LIVE_SOURCE))
 if str(CORE_SOURCE) not in sys.path:
@@ -105,6 +117,34 @@ def wait_until(predicate: Any, timeout: float = 25.0) -> bool:
     return predicate()
 
 
+def run_python_script(arguments: list[str]) -> int:
+    """Run a bundled maintenance script inside the frozen application runtime."""
+    if not arguments:
+        print("missing Python script path", file=sys.stderr)
+        return 2
+    script = Path(arguments[0]).expanduser().resolve()
+    try:
+        script.relative_to(SOURCE_ROOT.resolve())
+    except ValueError:
+        print(f"script is outside the application bundle: {script}", file=sys.stderr)
+        return 2
+    if script.suffix.lower() != ".py" or not script.is_file():
+        print(f"Python script not found: {script}", file=sys.stderr)
+        return 2
+
+    sys.argv = [str(script), *arguments[1:]]
+    if str(script.parent) not in sys.path:
+        sys.path.insert(0, str(script.parent))
+    try:
+        runpy.run_path(str(script), run_name="__main__")
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    except Exception:
+        logging.exception("Bundled Python script failed: %s", script)
+        return 1
+    return 0
+
+
 class DesktopHost:
     def __init__(self) -> None:
         self.live_server: Any = None
@@ -145,6 +185,7 @@ class DesktopHost:
             offline_app,
             host="127.0.0.1",
             port=8030,
+            log_config=None,
             log_level="warning",
             access_log=False,
         )
@@ -175,6 +216,7 @@ class DesktopHost:
             core_app,
             host=CORE_HOST,
             port=8011,
+            log_config=None,
             log_level="warning",
             access_log=False,
         )
@@ -206,6 +248,7 @@ class DesktopHost:
             live_app,
             host="127.0.0.1",
             port=8020,
+            log_config=None,
             log_level="warning",
             access_log=False,
         )
@@ -383,6 +426,9 @@ def run_window() -> int:
 
 
 def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--run-python-script":
+        return run_python_script(sys.argv[2:])
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--seconds", type=float, default=5.0)
@@ -398,7 +444,7 @@ def main() -> int:
         return run_window()
     except Exception:
         logging.exception("Desktop host failed")
-        if os.name == "nt":
+        if os.name == "nt" and not args.headless:
             ctypes.windll.user32.MessageBoxW(
                 None,
                 "VigorSync 启动失败，请查看 webdata/runtime/desktop.log。",

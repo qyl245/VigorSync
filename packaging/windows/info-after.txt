@@ -1,0 +1,19 @@
+VigorSync Mirror 已安装完成。
+
+程序与训练数据的位置：
+
+- 程序目录：Windows 的 VigorSync Mirror 安装目录。
+- 训练数据：%LOCALAPPDATA%\VigorSync\webdata。
+- 运行日志：%LOCALAPPDATA%\VigorSync\webdata\runtime\desktop.log。
+
+手机连接：
+
+1. 确认手机和迷你主机连接同一局域网。
+2. 手机可自动发现主机，也可手工填写 http://<迷你主机IP>:8011。
+3. 首次连接时按 App 提示完成配对。
+
+卸载说明：
+
+卸载程序默认保留训练历史、视频和离线报告。需要彻底清理时，请在确认数据已备份后手工删除：
+
+%LOCALAPPDATA%\VigorSync

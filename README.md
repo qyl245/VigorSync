@@ -30,6 +30,8 @@ M2 手机控制闭环、M3 离线分析闭环和 M4.1–M4.2 实时纠错/Window
 - [OpenAPI 契约](packages/contracts/openapi.yaml)
 - [会话状态机](packages/contracts/session-state-machine.json)
 - [离线 3D 姿态稳定与遮挡预测规则](docs/05-离线3D姿态稳定与遮挡预测规则.md)
+- [Windows 迷你主机移植方案](docs/06-Windows迷你主机移植方案.md)
+- [Windows 安装程序说明](packaging/windows/README.md)
 
 ## 契约校验
 
@@ -105,6 +107,19 @@ dist\VigorSyncLauncher\VigorSyncLauncher.exe
 
 ```powershell
 .\scripts\build_launcher.ps1
+```
+
+自包含桌面目录与 Windows 安装程序：
+
+```powershell
+.\scripts\build_desktop.ps1
+.\scripts\build_installer.ps1 -Version 0.1.0
+```
+
+安装程序输出到：
+
+```text
+dist\installer\VigorSync-Mirror-0.1.0-win-x64-setup.exe
 ```
 
 M1 离线检查（不占用摄像头）：
